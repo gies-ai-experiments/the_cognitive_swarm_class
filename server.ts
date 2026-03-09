@@ -4,7 +4,13 @@ import { Server } from "socket.io";
 import http from "http";
 import { GoogleGenAI, Type, LiveServerMessage } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+function getAI() {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+  if (!apiKey) {
+    console.warn("No API key found in environment variables.");
+  }
+  return new GoogleGenAI({ apiKey: apiKey || '' });
+}
 
 // Generate a fixed random projection matrix (3 x 768) to map embeddings to 3D space
 const projectionMatrix = Array.from({ length: 3 }, () =>
@@ -42,11 +48,160 @@ async function startServer() {
     topic: '',
     phase: 'divergent', // 'divergent' | 'convergent' | 'forging'
     ideas: [] as any[],
+    edges: [] as any[],
     flowData: { nodes: [], edges: [] } as { nodes: any[], edges: any[] },
   };
 
   let pendingIdeas: any[] = [];
   let pendingUpdates: any[] = [];
+
+  let lastIdeaTime = Date.now();
+
+  function triggerResearcher(idea: any) {
+    if (idea.authorId.startsWith('agent-')) return;
+    
+    getAI().models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `Find a real-world article, data point, or example that validates or relates to this idea: "${idea.text}". Return a short 3-word summary of the finding.`,
+      config: {
+        tools: [{ googleSearch: {} }]
+      }
+    }).then(response => {
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+      if (chunks && chunks.length > 0) {
+        const firstChunk = chunks.find(c => c.web?.uri);
+        if (firstChunk && firstChunk.web) {
+          idea.url = firstChunk.web.uri;
+          idea.urlTitle = firstChunk.web.title || response.text.substring(0, 30);
+          io.emit('idea_researched', { id: idea.id, url: idea.url, urlTitle: idea.urlTitle });
+        }
+      }
+    }).catch(err => console.error("Researcher error:", err));
+  }
+
+  // Catalyst Agent
+  setInterval(async () => {
+    if (state.ideas.length > 0 && Date.now() - lastIdeaTime > 60000) {
+      console.log("Catalyst Agent triggered");
+      try {
+        const response = await getAI().models.generateContent({
+          model: 'gemini-3.1-flash-lite-preview',
+          contents: `The current brainstorming topic is: "${state.topic}".
+          Here are the current ideas: ${JSON.stringify(state.ideas.map(i => i.text))}.
+          The brainstorm has stalled. Generate ONE wild, tangential, or highly creative new idea to spark inspiration.
+          Keep it to 3-7 words. Return JSON with 'idea' and 'category'.`,
+          config: { responseMimeType: "application/json" }
+        });
+        const result = JSON.parse(response.text || "{}");
+        if (result.idea && result.category) {
+          const ideaId = Math.random().toString(36).substring(2, 9);
+          const newIdea = {
+            id: ideaId,
+            text: result.idea,
+            weight: 1,
+            cluster: result.category,
+            authorId: 'agent-catalyst',
+            authorName: 'The Catalyst',
+            initialPosition: [(Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20],
+            targetPosition: null as any
+          };
+          state.ideas.push(newIdea);
+          pendingIdeas.push(newIdea);
+          lastIdeaTime = Date.now();
+
+          getAI().models.embedContent({
+            model: 'text-embedding-004',
+            contents: result.idea,
+          }).then(embRes => {
+            const embedding = embRes.embeddings?.[0]?.values;
+            if (embedding) {
+              const targetPosition = projectTo3D(embedding);
+              newIdea.targetPosition = targetPosition;
+              io.emit('idea_positioned', { id: ideaId, targetPosition });
+            }
+          }).catch(err => console.error("Embedding error:", err));
+        }
+      } catch (e) {
+        console.error("Catalyst error:", e);
+      }
+    }
+  }, 10000);
+
+  // Synthesizer Agent
+  setInterval(async () => {
+    if (state.ideas.length > 3) {
+      console.log("Synthesizer Agent triggered");
+      try {
+        const response = await getAI().models.generateContent({
+          model: 'gemini-3.1-flash-lite-preview',
+          contents: `Here are the current ideas: ${JSON.stringify(state.ideas.map(i => ({id: i.id, text: i.text}))) }.
+          Find 1-2 strong connections between existing ideas that aren't obvious.
+          Return a JSON array of objects with 'sourceId', 'targetId', and 'reason'.`,
+          config: { responseMimeType: "application/json" }
+        });
+        const edges = JSON.parse(response.text || "[]");
+        if (Array.isArray(edges) && edges.length > 0) {
+          edges.forEach(e => {
+            if (e.sourceId && e.targetId) {
+              state.edges.push({ source: e.sourceId, target: e.targetId, reason: e.reason });
+            }
+          });
+          io.emit('edges_updated', state.edges);
+        }
+      } catch (e) {
+        console.error("Synthesizer error:", e);
+      }
+    }
+  }, 45000);
+
+  // Devil's Advocate Agent
+  setInterval(async () => {
+    if (state.ideas.length > 5) {
+      console.log("Devil's Advocate Agent triggered");
+      try {
+        const response = await getAI().models.generateContent({
+          model: 'gemini-3.1-flash-lite-preview',
+          contents: `The current brainstorming topic is: "${state.topic}".
+          Here are the current ideas: ${JSON.stringify(state.ideas.map(i => i.text))}.
+          Act as a Devil's Advocate. Find a blind spot, contradiction, or critical flaw in the current ideas.
+          Generate ONE challenging question or counter-argument. Keep it to 5-10 words.
+          Return JSON with 'idea' and 'category' (use "Critique" as category).`,
+          config: { responseMimeType: "application/json" }
+        });
+        const result = JSON.parse(response.text || "{}");
+        if (result.idea) {
+          const ideaId = Math.random().toString(36).substring(2, 9);
+          const newIdea = {
+            id: ideaId,
+            text: result.idea,
+            weight: 1.5,
+            cluster: 'Critique',
+            authorId: 'agent-critic',
+            authorName: "Devil's Advocate",
+            initialPosition: [(Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20],
+            targetPosition: null as any
+          };
+          state.ideas.push(newIdea);
+          pendingIdeas.push(newIdea);
+          lastIdeaTime = Date.now();
+
+          getAI().models.embedContent({
+            model: 'text-embedding-004',
+            contents: result.idea,
+          }).then(embRes => {
+            const embedding = embRes.embeddings?.[0]?.values;
+            if (embedding) {
+              const targetPosition = projectTo3D(embedding);
+              newIdea.targetPosition = targetPosition;
+              io.emit('idea_positioned', { id: ideaId, targetPosition });
+            }
+          }).catch(err => console.error("Embedding error:", err));
+        }
+      } catch (e) {
+        console.error("Devil's Advocate error:", e);
+      }
+    }
+  }, 90000);
 
   // Batch broadcast every 1.5 seconds
   setInterval(() => {
@@ -71,7 +226,7 @@ async function startServer() {
     let liveSessionPromise: Promise<any> | null = null;
 
     socket.on("start_audio_session", (data: { topic: string, userName: string }) => {
-      liveSessionPromise = ai.live.connect({
+      liveSessionPromise = getAI().live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         callbacks: {
           onopen: () => {
@@ -106,9 +261,11 @@ async function startServer() {
                     };
                     state.ideas.push(newIdea);
                     pendingIdeas.push(newIdea);
+                    lastIdeaTime = Date.now();
+                    triggerResearcher(newIdea);
 
                     // Fetch embedding asynchronously
-                    ai.models.embedContent({
+                    getAI().models.embedContent({
                       model: 'text-embedding-004',
                       contents: args.idea,
                     }).then(response => {
@@ -248,6 +405,8 @@ async function startServer() {
       
       state.ideas.push(newIdea);
       pendingIdeas.push(newIdea);
+      lastIdeaTime = Date.now();
+      triggerResearcher(newIdea);
     });
 
     // Update idea embedding
@@ -285,7 +444,7 @@ async function startServer() {
         idea.cluster = data.cluster;
         
         if (data.textChanged) {
-          ai.models.embedContent({
+          getAI().models.embedContent({
             model: 'text-embedding-004',
             contents: data.text,
           }).then(response => {

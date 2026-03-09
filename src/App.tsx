@@ -19,6 +19,7 @@ export default function App() {
   const [topic, setTopic] = useState<string>('');
   const [isEditingTopic, setIsEditingTopic] = useState(false);
   const [ideas, setIdeas] = useState<any[]>([]);
+  const [swarmEdges, setSwarmEdges] = useState<any[]>([]);
   const ideasRef = useRef<any[]>([]);
   useEffect(() => { ideasRef.current = ideas; }, [ideas]);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
@@ -51,6 +52,7 @@ export default function App() {
       setTopic(state.topic || '');
       setPhase(state.phase);
       setIdeas(state.ideas);
+      setSwarmEdges(state.edges || []);
       if (state.flowData) {
         setFlowNodes(state.flowData.nodes || []);
         setFlowEdges(state.flowData.edges || []);
@@ -76,6 +78,16 @@ export default function App() {
       setIdeas((prev) => prev.map(i => 
         i.id === id ? { ...i, targetPosition } : i
       ));
+    });
+
+    newSocket.on('idea_researched', ({ id, url, urlTitle }: { id: string, url: string, urlTitle: string }) => {
+      setIdeas((prev) => prev.map(i => 
+        i.id === id ? { ...i, url, urlTitle } : i
+      ));
+    });
+
+    newSocket.on('edges_updated', (newEdges: any[]) => {
+      setSwarmEdges(newEdges);
     });
 
     newSocket.on('flow_updated', (data) => {
@@ -502,7 +514,7 @@ export default function App() {
         <div className="flex-1 relative border-r border-white/10 overflow-hidden">
           {(phase === 'divergent' || phase === 'forging') && (
             <div className="absolute inset-0">
-              <IdeaSwarm ideas={ideas} onIdeaClick={(idea) => setSelectedIdeaId(idea.id)} />
+              <IdeaSwarm ideas={ideas} edges={swarmEdges} onIdeaClick={(idea) => setSelectedIdeaId(idea.id)} />
               <div className="absolute bottom-6 left-6 pointer-events-none">
                 <div className="flex items-center gap-2 text-white/50 font-mono text-xs uppercase tracking-wider">
                   <Activity className="w-4 h-4" />

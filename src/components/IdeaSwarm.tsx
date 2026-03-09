@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useMemo } from 'react';
 import * as d3 from 'd3';
 
-export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdeaClick?: (idea: any) => void }) {
+export default function IdeaSwarm({ ideas, edges = [], onIdeaClick }: { ideas: any[], edges?: any[], onIdeaClick?: (idea: any) => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const simulationRef = useRef<d3.Simulation<any, undefined> | null>(null);
@@ -32,7 +32,14 @@ export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdea
     const clusterGroups = d3.group(physicsNodes.current, d => d.cluster);
     clusterGroups.forEach(nodesInCluster => {
       for (let i = 1; i < nodesInCluster.length; i++) {
-        links.push({ source: nodesInCluster[i-1].id, target: nodesInCluster[i].id });
+        links.push({ source: nodesInCluster[i-1].id, target: nodesInCluster[i].id, isCluster: true });
+      }
+    });
+
+    // Add explicit edges from the Synthesizer
+    edges.forEach(edge => {
+      if (physicsNodes.current.find(n => n.id === edge.source) && physicsNodes.current.find(n => n.id === edge.target)) {
+        links.push({ source: edge.source, target: edge.target, isCluster: false, reason: edge.reason });
       }
     });
 
@@ -41,8 +48,9 @@ export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdea
     linkElementsRef.current = svg.selectAll('line')
       .data(links)
       .join('line')
-      .attr('stroke', 'rgba(255,255,255,0.15)')
-      .attr('stroke-width', 2);
+      .attr('stroke', (d: any) => d.isCluster ? 'rgba(255,255,255,0.15)' : 'rgba(0,255,128,0.4)')
+      .attr('stroke-width', (d: any) => d.isCluster ? 2 : 1)
+      .attr('stroke-dasharray', (d: any) => d.isCluster ? 'none' : '4,4');
 
     if (!simulationRef.current) {
       simulationRef.current = d3.forceSimulation(physicsNodes.current)
@@ -87,7 +95,7 @@ export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdea
         return height / 2;
       }).strength(0.1));
 
-  }, [ideas]);
+  }, [ideas, edges]);
 
   return (
     <div ref={containerRef} className="w-full h-full bg-[#050505] relative overflow-hidden">
@@ -117,6 +125,17 @@ export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdea
             <div className="mt-3 px-4 py-1.5 bg-black/60 backdrop-blur-md border border-white/10 rounded-full text-white text-sm text-center shadow-xl">
               {idea.text}
             </div>
+            {idea.url && (
+              <a 
+                href={idea.url} 
+                target="_blank" 
+                rel="noreferrer" 
+                className="mt-1.5 text-[10px] text-blue-400 hover:text-blue-300 underline bg-black/40 px-2 py-0.5 rounded truncate max-w-full"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {idea.urlTitle || 'Source'}
+              </a>
+            )}
             <div className="mt-1.5 text-[10px] font-mono text-white/50 uppercase tracking-widest bg-black/40 px-2 py-0.5 rounded">
               {idea.cluster}
             </div>
