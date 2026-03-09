@@ -30,10 +30,33 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [session, setSession] = useState<any>(null);
+  const [selectedIdeaId, setSelectedIdeaId] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const stopSimulationRef = useRef<(() => void) | null>(null);
+
+  const handleEditIdea = (id: string, text: string, cluster: string) => {
+    if (socket) {
+      const idea = ideas.find(i => i.id === id);
+      if (idea && idea.text !== text) {
+        // Text changed, recalculate embedding
+        socket.emit('edit_idea', { id, text, cluster });
+        ai.models.embedContent({
+          model: 'text-embedding-004',
+          contents: text,
+        }).then(response => {
+          const embedding = response.embeddings?.[0]?.values;
+          if (embedding) {
+            socket.emit('update_idea_embedding', { id, embedding });
+          }
+        }).catch(err => console.error("Embedding error:", err));
+      } else {
+        // Only cluster changed
+        socket.emit('edit_idea', { id, text, cluster });
+      }
+    }
+  };
 
   // Connect to Socket.IO
   useEffect(() => {
@@ -63,6 +86,12 @@ export default function App() {
         const updated = updatedIdeas.find(u => u.id === i.id);
         return updated ? updated : i;
       }));
+    });
+
+    newSocket.on('idea_positioned', ({ id, targetPosition }: { id: string, targetPosition: [number, number, number] }) => {
+      setIdeas((prev) => prev.map(i => 
+        i.id === id ? { ...i, targetPosition } : i
+      ));
     });
 
     newSocket.on('flow_updated', (data) => {
@@ -188,7 +217,25 @@ export default function App() {
                 for (const call of calls) {
                   if (call.name === 'extractIdea') {
                     const args = call.args as any;
-                    socket?.emit('add_idea', { text: args.idea, cluster: args.category, authorName: userNameRef.current || 'Anonymous Node' });
+                    const ideaId = Math.random().toString(36).substring(2, 9);
+                    const ideaText = args.idea;
+                    const cluster = args.category;
+                    const authorName = userNameRef.current || 'Anonymous Node';
+
+                    // Emit immediately for instant fake placement
+                    socket?.emit('add_idea', { id: ideaId, text: ideaText, cluster, authorName });
+
+                    // Then calculate embedding and update
+                    ai.models.embedContent({
+                      model: 'text-embedding-004',
+                      contents: ideaText,
+                    }).then(response => {
+                      const embedding = response.embeddings?.[0]?.values;
+                      if (embedding) {
+                        socket?.emit('update_idea_embedding', { id: ideaId, embedding });
+                      }
+                    }).catch(err => console.error("Embedding error:", err));
+
                     functionResponses.push({
                       id: call.id,
                       name: call.name,
@@ -586,16 +633,64 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 relative flex">
         {/* Left Panel: 3D Swarm or Voting */}
-        <div className="flex-1 relative border-r border-white/10">
+        <div className="flex-1 relative border-r border-white/10 overflow-hidden">
           {(phase === 'divergent' || phase === 'forging') && (
             <div className="absolute inset-0">
-              <IdeaSwarm ideas={ideas} />
+              <IdeaSwarm ideas={ideas} onIdeaClick={(idea) => setSelectedIdeaId(idea.id)} />
               <div className="absolute bottom-6 left-6 pointer-events-none">
                 <div className="flex items-center gap-2 text-white/50 font-mono text-xs uppercase tracking-wider">
                   <Activity className="w-4 h-4" />
                   <span>Phase 1: Idea Swarm (Divergent)</span>
                 </div>
               </div>
+
+              {/* Edit Idea Panel */}
+              {selectedIdeaId && (
+                <motion.div 
+                  initial={{ x: -300, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  className="absolute top-0 left-0 w-80 h-full bg-black/80 backdrop-blur-xl border-r border-white/10 p-6 flex flex-col z-50 shadow-2xl"
+                >
+                  <div className="flex justify-between items-center mb-6">
+                    <h2 className="text-lg font-semibold text-white font-mono uppercase tracking-wider">Edit Node</h2>
+                    <button onClick={() => setSelectedIdeaId(null)} className="text-white/50 hover:text-white transition-colors">✕</button>
+                  </div>
+                  
+                  {(() => {
+                    const idea = ideas.find(i => i.id === selectedIdeaId);
+                    if (!idea) return null;
+                    return (
+                      <div className="flex flex-col gap-4">
+                        <div>
+                          <label className="block text-xs text-white/50 font-mono uppercase mb-1">Author</label>
+                          <div className="text-sm text-white/90 bg-white/5 px-3 py-2 rounded border border-white/10">{idea.authorName}</div>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-white/50 font-mono uppercase mb-1">Weight (Votes)</label>
+                          <div className="text-sm text-white/90 bg-white/5 px-3 py-2 rounded border border-white/10">{idea.weight}</div>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-white/50 font-mono uppercase mb-1">Cluster</label>
+                          <input 
+                            type="text" 
+                            value={idea.cluster}
+                            onChange={(e) => handleEditIdea(idea.id, idea.text, e.target.value)}
+                            className="w-full text-sm text-white bg-black/50 px-3 py-2 rounded border border-white/20 focus:border-[#00FF00] focus:outline-none transition-colors"
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <label className="block text-xs text-white/50 font-mono uppercase mb-1">Idea Text</label>
+                          <textarea 
+                            value={idea.text}
+                            onChange={(e) => handleEditIdea(idea.id, e.target.value, idea.cluster)}
+                            className="w-full h-32 text-sm text-white bg-black/50 px-3 py-2 rounded border border-white/20 focus:border-[#00FF00] focus:outline-none transition-colors resize-none"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </motion.div>
+              )}
             </div>
           )}
           

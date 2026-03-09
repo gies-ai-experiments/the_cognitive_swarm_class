@@ -1,123 +1,128 @@
-import { Canvas, useFrame } from '@react-three/fiber';
-import { Text, OrbitControls, Float } from '@react-three/drei';
-import { useMemo, useRef } from 'react';
-import * as THREE from 'three';
+import React, { useEffect, useRef, useMemo } from 'react';
+import * as d3 from 'd3';
 
-function IdeaNode({ idea, position }: { idea: any, position: [number, number, number] }) {
-  const ref = useRef<THREE.Group>(null);
-  const color = useMemo(() => {
-    // Simple hash to color based on cluster
-    let hash = 0;
-    for (let i = 0; i < idea.cluster.length; i++) {
-      hash = idea.cluster.charCodeAt(i) + ((hash << 5) - hash);
+export default function IdeaSwarm({ ideas, onIdeaClick }: { ideas: any[], onIdeaClick?: (idea: any) => void }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const simulationRef = useRef<d3.Simulation<any, undefined> | null>(null);
+  const physicsNodes = useRef<any[]>([]);
+  const linkElementsRef = useRef<any>(null);
+
+  // Stable color scale for clusters
+  const colorScale = useMemo(() => d3.scaleOrdinal(d3.schemeCategory10), []);
+
+  useEffect(() => {
+    if (!containerRef.current || !svgRef.current) return;
+    const width = containerRef.current.clientWidth;
+    const height = containerRef.current.clientHeight;
+
+    // Merge new ideas into physics nodes to preserve their current velocity/position
+    const existing = new Map(physicsNodes.current.map(n => [n.id, n]));
+    physicsNodes.current = ideas.map(idea => {
+      const old = existing.get(idea.id);
+      return old ? { ...old, ...idea } : { 
+        ...idea, 
+        x: width / 2 + (Math.random() - 0.5) * 100, 
+        y: height / 2 + (Math.random() - 0.5) * 100 
+      };
+    });
+
+    // Create links between nodes of the same cluster to form constellations
+    const links: any[] = [];
+    const clusterGroups = d3.group(physicsNodes.current, d => d.cluster);
+    clusterGroups.forEach(nodesInCluster => {
+      for (let i = 1; i < nodesInCluster.length; i++) {
+        links.push({ source: nodesInCluster[i-1].id, target: nodesInCluster[i].id });
+      }
+    });
+
+    // Setup SVG links
+    const svg = d3.select(svgRef.current);
+    linkElementsRef.current = svg.selectAll('line')
+      .data(links)
+      .join('line')
+      .attr('stroke', 'rgba(255,255,255,0.15)')
+      .attr('stroke-width', 2);
+
+    if (!simulationRef.current) {
+      simulationRef.current = d3.forceSimulation(physicsNodes.current)
+        .force('charge', d3.forceManyBody().strength(-400))
+        .force('collide', d3.forceCollide().radius((d: any) => 60 + (d.weight || 1) * 5))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .on('tick', () => {
+          // Update HTML nodes for the text/bubbles
+          if (!containerRef.current) return;
+          const elements = containerRef.current.querySelectorAll('.idea-node');
+          elements.forEach((el: any) => {
+            const id = el.getAttribute('data-id');
+            const node = physicsNodes.current.find(n => n.id === id);
+            if (node) {
+              el.style.transform = `translate(${node.x}px, ${node.y}px)`;
+            }
+          });
+
+          // Update SVG links for the constellation lines
+          if (linkElementsRef.current) {
+            linkElementsRef.current
+              .attr('x1', (d: any) => d.source.x)
+              .attr('y1', (d: any) => d.source.y)
+              .attr('x2', (d: any) => d.target.x)
+              .attr('y2', (d: any) => d.target.y);
+          }
+        });
+    } else {
+      simulationRef.current.nodes(physicsNodes.current);
+      simulationRef.current.alpha(0.3).restart();
     }
-    const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-    return '#' + '00000'.substring(0, 6 - c.length) + c;
-  }, [idea.cluster]);
 
-  const scale = 1 + (idea.weight * 0.1);
+    // Update target forces based on semantic embeddings (targetPosition from server)
+    simulationRef.current
+      .force('link', d3.forceLink(links).id((d: any) => d.id).distance(150).strength(0.05))
+      .force('x', d3.forceX((d: any) => {
+        if (d.targetPosition) return width / 2 + d.targetPosition[0] * 30; // Scale X
+        return width / 2;
+      }).strength(0.1))
+      .force('y', d3.forceY((d: any) => {
+        if (d.targetPosition) return height / 2 + d.targetPosition[1] * 30; // Scale Y
+        return height / 2;
+      }).strength(0.1));
 
-  return (
-    <Float speed={1.5} rotationIntensity={0.5} floatIntensity={2}>
-      <group ref={ref} position={position} scale={scale}>
-        <mesh>
-          <sphereGeometry args={[0.5, 32, 32]} />
-          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.5} wireframe />
-        </mesh>
-        <Text
-          position={[0, 0.8, 0]}
-          fontSize={0.3}
-          color="white"
-          anchorX="center"
-          anchorY="middle"
-          maxWidth={3}
-          textAlign="center"
-        >
-          {idea.text}
-        </Text>
-        <Text
-          position={[0, -0.8, 0]}
-          fontSize={0.15}
-          color={color}
-          anchorX="center"
-          anchorY="middle"
-        >
-          [{idea.cluster}]
-        </Text>
-      </group>
-    </Float>
-  );
-}
-
-export default function IdeaSwarm({ ideas }: { ideas: any[] }) {
-  // Generate positions for ideas grouped by cluster
-  const positions = useMemo(() => {
-    // Group ideas by cluster
-    const clusters: Record<string, any[]> = {};
-    ideas.forEach(idea => {
-      if (!clusters[idea.cluster]) clusters[idea.cluster] = [];
-      clusters[idea.cluster].push(idea);
-    });
-
-    const clusterNames = Object.keys(clusters);
-    const numClusters = clusterNames.length;
-    
-    // Assign a base position for each cluster on a large sphere
-    const clusterCenters: Record<string, [number, number, number]> = {};
-    clusterNames.forEach((name, i) => {
-      // Distribute cluster centers evenly using spherical Fibonacci or simple ring
-      const phi = Math.acos(1 - 2 * (i + 0.5) / Math.max(1, numClusters));
-      const theta = Math.PI * (1 + Math.sqrt(5)) * i;
-      const radius = 12; // Distance of cluster centers from origin
-      
-      clusterCenters[name] = [
-        radius * Math.sin(phi) * Math.cos(theta),
-        radius * Math.sin(phi) * Math.sin(theta),
-        radius * Math.cos(phi)
-      ];
-    });
-
-    // Assign individual idea positions around their cluster center
-    return ideas.map((idea) => {
-      const center = clusterCenters[idea.cluster] || [0, 0, 0];
-      
-      // Small random offset around the cluster center
-      const offsetRadius = 2 + Math.random() * 3;
-      const offsetTheta = Math.random() * Math.PI * 2;
-      const offsetPhi = Math.acos(Math.random() * 2 - 1);
-      
-      return [
-        center[0] + offsetRadius * Math.sin(offsetPhi) * Math.cos(offsetTheta),
-        center[1] + offsetRadius * Math.sin(offsetPhi) * Math.sin(offsetTheta),
-        center[2] + offsetRadius * Math.cos(offsetPhi)
-      ] as [number, number, number];
-    });
   }, [ideas]);
 
   return (
-    <div className="w-full h-full bg-[#050505]">
-      <Canvas camera={{ position: [0, 0, 15], fov: 60 }}>
-        <ambientLight intensity={0.5} />
-        <pointLight position={[10, 10, 10]} intensity={1} />
-        <OrbitControls enablePan={true} enableZoom={true} enableRotate={true} autoRotate autoRotateSpeed={0.5} />
-        
-        {ideas.map((idea, i) => (
-          <IdeaNode key={idea.id} idea={idea} position={positions[i] || [0,0,0]} />
-        ))}
-        
-        {/* Background particles */}
-        <points>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              count={1000}
-              array={new Float32Array(3000).map(() => (Math.random() - 0.5) * 50)}
-              itemSize={3}
+    <div ref={containerRef} className="w-full h-full bg-[#050505] relative overflow-hidden">
+      {/* SVG for links between nodes of the same cluster */}
+      <svg ref={svgRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+      {ideas.map(idea => {
+        const scale = 1 + (idea.weight * 0.1);
+        return (
+          <div
+            key={idea.id}
+            data-id={idea.id}
+            onClick={() => onIdeaClick && onIdeaClick(idea)}
+            className="idea-node absolute top-0 left-0 flex flex-col items-center justify-center cursor-pointer transition-transform hover:scale-110 z-10"
+            style={{
+              // Initial hidden/center position, D3 will take over immediately
+              transform: `translate(-9999px, -9999px)`,
+              marginLeft: '-100px', // Half of max width to center it
+              marginTop: '-50px',
+              width: '200px',
+            }}
+          >
+            <div 
+              className="w-6 h-6 rounded-full shadow-[0_0_20px_rgba(255,255,255,0.8)] border-2 border-white/50 transition-transform duration-300"
+              style={{ backgroundColor: colorScale(idea.cluster), transform: `scale(${scale})` }}
             />
-          </bufferGeometry>
-          <pointsMaterial size={0.05} color="#ffffff" transparent opacity={0.2} />
-        </points>
-      </Canvas>
+            <div className="mt-3 px-4 py-1.5 bg-black/60 backdrop-blur-md border border-white/10 rounded-full text-white text-sm text-center shadow-xl">
+              {idea.text}
+            </div>
+            <div className="mt-1.5 text-[10px] font-mono text-white/50 uppercase tracking-widest bg-black/40 px-2 py-0.5 rounded">
+              {idea.cluster}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

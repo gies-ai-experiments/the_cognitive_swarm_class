@@ -3,6 +3,25 @@ import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
 
+// Generate a fixed random projection matrix (3 x 768) to map embeddings to 3D space
+const projectionMatrix = Array.from({ length: 3 }, () =>
+  Array.from({ length: 768 }, () => (Math.random() - 0.5) * 2)
+);
+
+function projectTo3D(embedding: number[]): [number, number, number] {
+  let x = 0, y = 0, z = 0;
+  for (let i = 0; i < embedding.length; i++) {
+    x += embedding[i] * projectionMatrix[0][i];
+    y += embedding[i] * projectionMatrix[1][i];
+    z += embedding[i] * projectionMatrix[2][i];
+  }
+  // Normalize and scale to fit visual space
+  const mag = Math.sqrt(x * x + y * y + z * z);
+  if (mag === 0) return [0, 0, 0];
+  const scale = 12; // Spread radius
+  return [(x / mag) * scale, (y / mag) * scale, (z / mag) * scale];
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -19,7 +38,7 @@ async function startServer() {
   let state = {
     topic: '',
     phase: 'divergent', // 'divergent' | 'convergent' | 'forging'
-    ideas: [] as { id: string, text: string, weight: number, cluster: string, authorId: string, authorName: string }[],
+    ideas: [] as any[],
     flowData: { nodes: [], edges: [] } as { nodes: any[], edges: any[] },
   };
 
@@ -53,17 +72,36 @@ async function startServer() {
     });
 
     // Ingestion Task: Receive new ideas from clients (extracted via Gemini)
-    socket.on("add_idea", (idea: { text: string, cluster: string, authorName?: string }) => {
+    socket.on("add_idea", (idea: { id?: string, text: string, cluster: string, authorName?: string }) => {
+      const initialPosition = [
+        (Math.random() - 0.5) * 20,
+        (Math.random() - 0.5) * 20,
+        (Math.random() - 0.5) * 20
+      ];
+
       const newIdea = {
-        id: Math.random().toString(36).substring(2, 9),
+        id: idea.id || Math.random().toString(36).substring(2, 9),
         text: idea.text,
         weight: 1, // Initial weight
         cluster: idea.cluster || 'General',
         authorId: socket.id,
-        authorName: idea.authorName || 'Anonymous Node'
+        authorName: idea.authorName || 'Anonymous Node',
+        initialPosition,
+        targetPosition: null // Will be updated after embedding
       };
+      
       state.ideas.push(newIdea);
       pendingIdeas.push(newIdea);
+    });
+
+    // Update idea embedding
+    socket.on("update_idea_embedding", (data: { id: string, embedding: number[] }) => {
+      const existingIdea = state.ideas.find(i => i.id === data.id);
+      if (existingIdea) {
+        const targetPosition = projectTo3D(data.embedding);
+        existingIdea.targetPosition = targetPosition;
+        io.emit('idea_positioned', { id: existingIdea.id, targetPosition });
+      }
     });
 
     // Consensus Mediator Task: Idea Voting
@@ -75,6 +113,28 @@ async function startServer() {
         if (idea.weight < 0) idea.weight = 0;
         
         const existingUpdateIndex = pendingUpdates.findIndex(u => u.id === data.ideaId);
+        if (existingUpdateIndex >= 0) {
+          pendingUpdates[existingUpdateIndex] = idea;
+        } else {
+          pendingUpdates.push(idea);
+        }
+      }
+    });
+
+    // Edit Idea Task
+    socket.on("edit_idea", (data: { id: string, text: string, cluster: string, embedding?: number[] }) => {
+      const idea = state.ideas.find(i => i.id === data.id);
+      if (idea) {
+        idea.text = data.text;
+        idea.cluster = data.cluster;
+        
+        if (data.embedding) {
+          const targetPosition = projectTo3D(data.embedding);
+          idea.targetPosition = targetPosition;
+          io.emit('idea_positioned', { id: idea.id, targetPosition });
+        }
+        
+        const existingUpdateIndex = pendingUpdates.findIndex(u => u.id === data.id);
         if (existingUpdateIndex >= 0) {
           pendingUpdates[existingUpdateIndex] = idea;
         } else {
