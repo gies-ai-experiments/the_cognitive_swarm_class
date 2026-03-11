@@ -38,6 +38,7 @@ export default function App() {
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const stopSimulationRef = useRef<(() => void) | null>(null);
   const audioQueueRef = useRef<AudioBuffer[]>([]);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextPlayTimeRef = useRef<number>(0);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -94,6 +95,11 @@ export default function App() {
       setTopic(newTopic);
     });
 
+    newSocket.on('error', (err: any) => {
+      console.error("Server error:", err);
+      setAudioError(err.message || "Unknown server error");
+    });
+
     newSocket.on('ideas_batch_added', (newIdeas: any[]) => {
       setIdeas((prev) => [...prev, ...newIdeas]);
     });
@@ -136,7 +142,21 @@ export default function App() {
       setPhase(newPhase);
     });
 
+    newSocket.on('audio_interrupted', () => {
+      audioQueueRef.current = [];
+      activeSourcesRef.current.forEach(source => {
+        try {
+          source.stop();
+        } catch (e) {}
+      });
+      activeSourcesRef.current = [];
+      if (audioContextRef.current) {
+        nextPlayTimeRef.current = audioContextRef.current.currentTime;
+      }
+    });
+
     newSocket.on('audio_response', async (base64Audio: string) => {
+      console.log("Received audio response of length:", base64Audio.length);
       if (!audioContextRef.current) return;
       const ctx = audioContextRef.current;
       
@@ -156,6 +176,8 @@ export default function App() {
         float32Array[i] = int16Array[i] / 32768.0;
       }
       
+      if (float32Array.length === 0) return;
+      
       const audioBuffer = ctx.createBuffer(1, float32Array.length, 24000);
       audioBuffer.getChannelData(0).set(float32Array);
       
@@ -170,6 +192,11 @@ export default function App() {
       
       source.start(nextPlayTimeRef.current);
       nextPlayTimeRef.current += audioBuffer.duration;
+      
+      activeSourcesRef.current.push(source);
+      source.onended = () => {
+        activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+      };
     });
 
     newSocket.on('audio_session_closed', () => {
@@ -209,6 +236,9 @@ export default function App() {
     }
 
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Browser does not support audio recording or permissions are missing.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       
@@ -220,46 +250,22 @@ export default function App() {
 
       const source = audioContext.createMediaStreamSource(stream);
       
-      const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.bufferSize = 4096;
-            this.buffer = new Int16Array(this.bufferSize);
-            this.bytesWritten = 0;
-          }
-          process(inputs, outputs, parameters) {
-            const input = inputs[0];
-            if (input && input.length > 0) {
-              const channelData = input[0];
-              for (let i = 0; i < channelData.length; i++) {
-                this.buffer[this.bytesWritten++] = Math.max(-1, Math.min(1, channelData[i])) * 0x7FFF;
-                if (this.bytesWritten >= this.bufferSize) {
-                  const outBuffer = new Int16Array(this.buffer);
-                  this.port.postMessage(outBuffer.buffer, [outBuffer.buffer]);
-                  this.bytesWritten = 0;
-                }
-              }
-            }
-            return true;
-          }
-        }
-        registerProcessor('pcm-processor', PCMProcessor);
-      `;
-
-      const blob = new Blob([workletCode], { type: 'application/javascript' });
-      const workletUrl = URL.createObjectURL(blob);
-      await audioContext.audioWorklet.addModule(workletUrl);
+      await audioContext.audioWorklet.addModule('/pcm-processor.js');
       
       const workletNode = new AudioWorkletNode(audioContext, 'pcm-processor');
       workletNodeRef.current = workletNode;
 
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      
       source.connect(workletNode);
-      workletNode.connect(audioContext.destination);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioContext.destination);
 
       console.log("Emitting start_audio_session");
       socket?.emit('start_audio_session', { topic, userName: userNameRef.current });
 
+      let chunkCount = 0;
       workletNode.port.onmessage = (e) => {
         const buffer = e.data;
         const bytes = new Uint8Array(buffer);
@@ -268,6 +274,10 @@ export default function App() {
           binary += String.fromCharCode(bytes[i]);
         }
         const base64Data = window.btoa(binary);
+        chunkCount++;
+        if (chunkCount % 10 === 0) {
+          console.log("Sent 10 audio chunks");
+        }
         socket?.emit('audio_chunk', base64Data);
       };
 
@@ -294,6 +304,9 @@ export default function App() {
     }
 
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Browser does not support video recording or permissions are missing.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       videoStreamRef.current = stream;
       
@@ -336,6 +349,10 @@ export default function App() {
 
   const [forgeError, setForgeError] = useState<string | null>(null);
   const [isForging, setIsForging] = useState(false);
+
+  const requestSuggestion = () => {
+    socket?.emit('suggest_direction');
+  };
 
   const handleManualForge = async () => {
     try {
@@ -628,6 +645,7 @@ export default function App() {
               <span className="text-xs font-mono text-white/50 uppercase">Credits</span>
               <span className="text-sm font-bold text-[#00FF00]">{credits}</span>
             </div>
+            
             <button
               onClick={toggleCamera}
               className={`flex items-center gap-2 px-4 py-2 rounded-full font-mono text-sm transition-all ${
@@ -639,6 +657,15 @@ export default function App() {
               {isCameraActive ? <Camera className="w-4 h-4" /> : <CameraOff className="w-4 h-4" />}
               {isCameraActive ? 'Camera On' : 'Camera Off'}
             </button>
+            {isRecording && (
+              <button
+                onClick={requestSuggestion}
+                className="flex items-center gap-2 px-4 py-2 rounded-full font-mono text-sm transition-all bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 hover:bg-emerald-500/30"
+              >
+                <BrainCircuit className="w-4 h-4" />
+                Suggest Direction
+              </button>
+            )}
             <button
               onClick={toggleRecording}
               className={`flex items-center gap-2 px-4 py-2 rounded-full font-mono text-sm transition-all ${

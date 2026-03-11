@@ -11,17 +11,19 @@ function logToFile(msg: string) {
 }
 
 function getAI() {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = "AIzaSyAqX5a9lvo58lz_Ihh9fkKF95d8c6Ebpcg";
   if (!apiKey) {
     console.warn("No API key found in environment variables. Initializing without explicit key.");
     return new GoogleGenAI({});
   }
+  console.log("Initializing GoogleGenAI with API key of length:", apiKey.length);
+  logToFile("Initializing GoogleGenAI with API key of length: " + apiKey.length + ", starts with: " + apiKey.substring(0, 3));
   return new GoogleGenAI({ apiKey });
 }
 
 // Generate a fixed random projection matrix (3 x 768) to map embeddings to 3D space
 const projectionMatrix = Array.from({ length: 3 }, () =>
-  Array.from({ length: 768 }, () => (Math.random() - 0.5) * 2)
+  Array.from({ length: 3072 }, () => (Math.random() - 0.5) * 2)
 );
 
 function projectTo3D(embedding: number[]): [number, number, number] {
@@ -41,6 +43,9 @@ function projectTo3D(embedding: number[]): [number, number, number] {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  
+  console.log("Server starting. GEMINI_API_KEY is", process.env.GEMINI_API_KEY ? "SET" : "NOT SET");
+  logToFile("Server starting. GEMINI_API_KEY is " + (process.env.GEMINI_API_KEY ? "SET" : "NOT SET"));
   
   const server = http.createServer(app);
   const io = new Server(server, {
@@ -83,7 +88,10 @@ async function startServer() {
           io.emit('idea_researched', { id: idea.id, url: idea.url, urlTitle: idea.urlTitle });
         }
       }
-    }).catch(err => console.error("Researcher error:", err));
+    }).catch(err => {
+      console.error("Researcher error:", err);
+      io.emit('error', { message: `Researcher error: ${err.message}` });
+    });
   }
 
   // Catalyst Agent
@@ -117,7 +125,7 @@ async function startServer() {
           lastIdeaTime = Date.now();
 
           getAI().models.embedContent({
-            model: 'text-embedding-004',
+            model: 'gemini-embedding-001',
             contents: result.idea,
           }).then(embRes => {
             const embedding = embRes.embeddings?.[0]?.values;
@@ -128,8 +136,9 @@ async function startServer() {
             }
           }).catch(err => console.error("Embedding error:", err));
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error("Catalyst error:", e);
+        io.emit('error', { message: `Catalyst error: ${e.message}` });
       }
     }
   }, 10000);
@@ -155,8 +164,9 @@ async function startServer() {
           });
           io.emit('edges_updated', state.edges);
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error("Synthesizer error:", e);
+        io.emit('error', { message: `Synthesizer error: ${e.message}` });
       }
     }
   }, 45000);
@@ -193,7 +203,7 @@ async function startServer() {
           lastIdeaTime = Date.now();
 
           getAI().models.embedContent({
-            model: 'text-embedding-004',
+            model: 'gemini-embedding-001',
             contents: result.idea,
           }).then(embRes => {
             const embedding = embRes.embeddings?.[0]?.values;
@@ -204,8 +214,9 @@ async function startServer() {
             }
           }).catch(err => console.error("Embedding error:", err));
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error("Devil's Advocate error:", e);
+        io.emit('error', { message: `Devil's Advocate error: ${e.message}` });
       }
     }
   }, 90000);
@@ -233,11 +244,33 @@ async function startServer() {
     let liveSessionPromise: Promise<any> | null = null;
     let audioActive = false;
     let videoActive = false;
+    let lastSpokenTime = Date.now();
+
+    const suggestionInterval = setInterval(() => {
+      if (audioActive && liveSessionPromise && state.ideas.length > 0) {
+        // If no ideas added globally for 45s, and this agent hasn't spoken for 60s
+        if (Date.now() - lastIdeaTime > 45000 && Date.now() - lastSpokenTime > 60000) {
+          logToFile("Auto-suggesting direction for " + socket.id);
+          lastSpokenTime = Date.now();
+          liveSessionPromise.then(s => {
+            s.send({
+              clientContent: {
+                turns: [{
+                  role: "user",
+                  parts: [{ text: "System Notification: The brainstorm has stalled. Please speak directly to the users and suggest a new, unexplored direction or perspective based on the current ideas." }]
+                }],
+                turnComplete: true
+              }
+            });
+          }).catch(err => console.error("Error sending auto-suggestion:", err));
+        }
+      }
+    }, 15000);
 
     const startSessionIfNeeded = (topic: string, userName: string) => {
       if (liveSessionPromise) return;
       
-      liveSessionPromise = getAI().live.connect({
+      const newSessionPromise = getAI().live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         callbacks: {
           onopen: () => {
@@ -249,11 +282,18 @@ async function startServer() {
             // console.log("Received message from Gemini:", Object.keys(message));
             if (message.serverContent?.modelTurn) {
               logToFile("Received modelTurn: " + JSON.stringify(message.serverContent.modelTurn).substring(0, 200));
+              const parts = message.serverContent.modelTurn.parts;
+              if (parts) {
+                for (const part of parts) {
+                  if (part.inlineData?.data) {
+                    socket.emit("audio_response", part.inlineData.data);
+                  }
+                }
+              }
             }
-            // Forward audio to client
-            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (base64Audio) {
-              socket.emit("audio_response", base64Audio);
+            if (message.serverContent?.interrupted) {
+              logToFile("Received interrupted from Gemini");
+              socket.emit("audio_interrupted");
             }
 
             // Handle tool calls
@@ -284,7 +324,7 @@ async function startServer() {
 
                     // Fetch embedding asynchronously
                     getAI().models.embedContent({
-                      model: 'text-embedding-004',
+                      model: 'gemini-embedding-001',
                       contents: args.idea,
                     }).then(response => {
                       const embedding = response.embeddings?.[0]?.values;
@@ -324,14 +364,21 @@ async function startServer() {
               }
             }
           },
-          onclose: () => {
-            console.log("Gemini Live Disconnected for", socket.id);
-            logToFile("Gemini Live Disconnected for " + socket.id);
+          onclose: (event) => {
+            console.log("Gemini Live Disconnected for", socket.id, "Code:", event?.code, "Reason:", event?.reason);
+            logToFile("Gemini Live Disconnected for " + socket.id + " Code: " + event?.code + " Reason: " + event?.reason);
             socket.emit("audio_session_closed");
+            if (liveSessionPromise === newSessionPromise) {
+              liveSessionPromise = null;
+            }
           },
-          onerror: (err) => {
-            console.error("Gemini Live Error for", socket.id, err);
-            logToFile("Gemini Live Error for " + socket.id + ": " + (err instanceof Error ? err.message : JSON.stringify(err)));
+          onerror: (err: any) => {
+            console.error("Gemini Live Error for", socket.id, err.message, err.error);
+            logToFile("Gemini Live Error for " + socket.id + ": " + err.message + " - " + (err.error ? err.error.message : ""));
+            socket.emit('error', { message: `Gemini Live Error: ${err.message || (err.error ? err.error.message : 'Unknown error')}` });
+            if (liveSessionPromise === newSessionPromise) {
+              liveSessionPromise = null;
+            }
           }
         },
         config: {
@@ -339,16 +386,12 @@ async function startServer() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
-          systemInstruction: `You are the Supervisor of 'The Cognitive Swarm', a real-time multimodal brainstorming tool.
-          The current brainstorming topic is: "${topic}".
-          You are talking to: ${userName}.
-          You can see the user's camera feed and hear their voice.
-          Your job is to listen to the user, extract concise ideas, and use the 'extractIdea' tool to add them to the swarm.
-          Keep your verbal responses extremely short, encouraging, and robotic/AI-like (e.g., "Idea logged.", "Processing.", "Good thought.").
-          If they ask to summarize or create a diagram, FIRST use the 'getIdeas' tool to retrieve the current list of ideas, THEN use the 'generateMermaid' tool to create a flowchart or ER diagram based on those ideas.
-          Only use 'generateMermaid' when explicitly asked to summarize, forge, or diagram the ideas.
-          IMPORTANT: You MUST use the 'extractIdea' tool whenever the user shares a new idea. Do not just acknowledge it verbally.
-          CRITICAL INSTRUCTION: If the user says anything that sounds like an idea, a suggestion, or a thought related to the topic, you MUST call the 'extractIdea' tool immediately.`,
+          systemInstruction: `You are the Supervisor of 'The Cognitive Swarm'.
+          Topic: "${topic}". User: ${userName}.
+          Listen to the user, extract concise ideas, and use the 'extractIdea' tool to add them.
+          Keep verbal responses extremely short (e.g., "Idea logged.").
+          If asked to summarize or diagram, use 'getIdeas' then 'generateMermaid'.
+          IMPORTANT: You MUST use 'extractIdea' whenever the user shares a new idea.`,
           tools: [{
             functionDeclarations: [
               {
@@ -389,10 +432,15 @@ async function startServer() {
         }
       });
       
+      liveSessionPromise = newSessionPromise;
+      
       liveSessionPromise.catch(err => {
         console.error("Live session connect error:", err);
         logToFile("Live session connect error: " + err.message);
-        liveSessionPromise = null;
+        socket.emit('error', { message: `Live session connect error: ${err.message}` });
+        if (liveSessionPromise === newSessionPromise) {
+          liveSessionPromise = null;
+        }
       });
     };
 
@@ -415,6 +463,24 @@ async function startServer() {
       stopSessionIfNeeded();
     });
 
+    socket.on("suggest_direction", () => {
+      logToFile("suggest_direction received for " + socket.id);
+      lastSpokenTime = Date.now();
+      if (liveSessionPromise) {
+        liveSessionPromise.then(s => {
+          s.send({
+            clientContent: {
+              turns: [{
+                role: "user",
+                parts: [{ text: "System Notification: The users are asking for a suggestion on a new, unexplored direction for the brainstorm based on the current ideas. Please speak directly to them and suggest one." }]
+              }],
+              turnComplete: true
+            }
+          });
+        }).catch(err => console.error("Error sending suggest_direction:", err));
+      }
+    });
+
     socket.on("start_video_session", (data: { topic: string, userName: string }) => {
       videoActive = true;
       startSessionIfNeeded(data.topic, data.userName);
@@ -425,7 +491,27 @@ async function startServer() {
       stopSessionIfNeeded();
     });
 
+    let audioChunkCount = 0;
+    socket.on("text_chunk", (text: string) => {
+      logToFile(`Received text chunk: ${text}`);
+      if (liveSessionPromise) {
+        liveSessionPromise.then(s => {
+          s.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text }] }],
+            turnComplete: true
+          });
+        }).catch(err => {
+          console.error("Error sending text chunk:", err);
+          logToFile("Error sending text chunk: " + err.message);
+        });
+      }
+    });
+
     socket.on("audio_chunk", (base64Data: string) => {
+      audioChunkCount++;
+      if (audioChunkCount % 10 === 0) {
+        logToFile(`Received 10 audio chunks from ${socket.id}`);
+      }
       if (liveSessionPromise) {
         liveSessionPromise.then(s => {
           s.sendRealtimeInput({
@@ -520,7 +606,7 @@ async function startServer() {
         
         if (data.textChanged) {
           getAI().models.embedContent({
-            model: 'text-embedding-004',
+            model: 'gemini-embedding-001',
             contents: data.text,
           }).then(response => {
             const embedding = response.embeddings?.[0]?.values;
@@ -555,6 +641,8 @@ async function startServer() {
 
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
+      clearInterval(suggestionInterval);
+      stopSessionIfNeeded();
     });
   });
 
