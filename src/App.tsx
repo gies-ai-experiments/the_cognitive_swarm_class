@@ -77,6 +77,8 @@ export default function App() {
   const videoIntervalRef = useRef<number | null>(null);
   const suggestionTimeoutRef = useRef<number | null>(null);
   const anchorAnnouncementIdRef = useRef(0);
+  const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSyncedTextRef = useRef<Record<string, string>>({});
 
   const ensurePlaybackAudioContext = async () => {
     const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
@@ -167,14 +169,17 @@ export default function App() {
   };
 
   const handleEditIdea = (id: string, text: string, cluster: string) => {
-    if (socket) {
-      const idea = ideas.find(i => i.id === id);
-      if (idea && idea.text !== text) {
-        socket.emit('edit_idea', { id, text, cluster, textChanged: true });
-      } else {
-        socket.emit('edit_idea', { id, text, cluster, textChanged: false });
+    // Update local state immediately for responsive UI
+    setIdeas(prev => prev.map(i => i.id === id ? { ...i, text, cluster } : i));
+
+    if (editDebounceRef.current) clearTimeout(editDebounceRef.current);
+    editDebounceRef.current = setTimeout(() => {
+      if (socket) {
+        const textChanged = lastSyncedTextRef.current[id] !== text;
+        socket.emit('edit_idea', { id, text, cluster, textChanged });
+        lastSyncedTextRef.current[id] = text;
       }
-    }
+    }, 400);
   };
 
   // Connect to Socket.IO
