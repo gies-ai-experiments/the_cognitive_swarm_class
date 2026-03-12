@@ -24,12 +24,13 @@ export default function ArtifactCanvas({ artifact }: { artifact: ArtifactData | 
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragStateRef = useRef<{ x: number; y: number; active: boolean }>({ x: 0, y: 0, active: false });
+  const renderCountRef = useRef(0);
 
   useEffect(() => {
     mermaid.initialize({
       startOnLoad: false,
       theme: 'dark',
-      securityLevel: 'loose',
+      securityLevel: 'strict',
       darkMode: true,
       flowchart: {
         curve: 'basis',
@@ -51,7 +52,8 @@ export default function ArtifactCanvas({ artifact }: { artifact: ArtifactData | 
     let cancelled = false;
     const render = async () => {
       try {
-        const id = `artifact-${artifact.diagramType}-${artifact.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
+        renderCountRef.current += 1;
+        const id = `artifact-${renderCountRef.current}-${artifact.diagramType}`;
         const { svg } = await mermaid.render(id, artifact.mermaid);
         if (!cancelled) {
           setSvgMarkup(svg);

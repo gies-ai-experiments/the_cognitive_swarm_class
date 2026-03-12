@@ -33,15 +33,19 @@ function emitInlineAudio(
   });
 }
 
+let _aiClient: InstanceType<typeof GoogleGenAI> | null = null;
 function getAI() {
+  if (_aiClient) return _aiClient;
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.warn("No API key found in environment variables. Initializing without explicit key.");
-    return new GoogleGenAI({});
+    _aiClient = new GoogleGenAI({});
+  } else {
+    console.log("Initializing GoogleGenAI with API key of length:", apiKey.length);
+    logToFile("Initializing GoogleGenAI with API key of length: " + apiKey.length);
+    _aiClient = new GoogleGenAI({ apiKey });
   }
-  console.log("Initializing GoogleGenAI with API key of length:", apiKey.length);
-  logToFile("Initializing GoogleGenAI with API key of length: " + apiKey.length);
-  return new GoogleGenAI({ apiKey });
+  return _aiClient;
 }
 
 // Generate a fixed random projection matrix (3 x 768) to map embeddings to 3D space
@@ -506,6 +510,7 @@ async function startServer() {
 
   // Synthesizer Agent
   setInterval(async () => {
+    if (!state.topic || participants.size === 0) return;
     if (state.ideas.length > 3) {
       console.log("Synthesizer Agent triggered");
       try {
@@ -524,9 +529,17 @@ async function startServer() {
         if (Array.isArray(edges) && edges.length > 0) {
           edges.forEach(e => {
             if (e.sourceId && e.targetId) {
-              state.edges.push({ source: e.sourceId, target: e.targetId, reason: e.reason });
+              const exists = state.edges.some(
+                existing => existing.source === e.sourceId && existing.target === e.targetId
+              );
+              if (!exists) {
+                state.edges.push({ source: e.sourceId, target: e.targetId, reason: e.reason });
+              }
             }
           });
+          if (state.edges.length > 100) {
+            state.edges = state.edges.slice(-100);
+          }
           io.emit('edges_updated', state.edges);
         }
       } catch (e: any) {
@@ -538,6 +551,7 @@ async function startServer() {
 
   // Devil's Advocate Agent
   setInterval(async () => {
+    if (!state.topic || participants.size === 0) return;
     if (state.ideas.length > 5) {
       console.log("Devil's Advocate Agent triggered");
       try {

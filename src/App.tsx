@@ -302,12 +302,33 @@ export default function App() {
       }
       if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
         audioContextRef.current.close();
+        audioContextRef.current = null;
       }
     });
 
     return () => {
       if (suggestionTimeoutRef.current) {
         window.clearTimeout(suggestionTimeoutRef.current);
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      if (videoStreamRef.current) {
+        videoStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      if (videoIntervalRef.current) {
+        window.clearInterval(videoIntervalRef.current);
+      }
+      if (workletNodeRef.current) {
+        workletNodeRef.current.disconnect();
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+      if (playbackAudioContextRef.current && playbackAudioContextRef.current.state !== 'closed') {
+        playbackAudioContextRef.current.close();
+        playbackAudioContextRef.current = null;
       }
       newSocket.disconnect();
     };
@@ -330,6 +351,7 @@ export default function App() {
       }
       if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
         audioContextRef.current.close();
+        audioContextRef.current = null;
       }
       setIsRecording(false);
       return;
