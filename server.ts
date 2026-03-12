@@ -921,6 +921,7 @@ async function startServer() {
     });
 
     let audioChunkCount = 0;
+    let pendingAudioChunks: string[] = [];
     socket.on("text_chunk", (text: string) => {
       logToFile(`Received text chunk: ${text}`);
       interruptAnchorAudio(io);
@@ -946,7 +947,12 @@ async function startServer() {
         logToFile(`Received 10 audio chunks from ${socket.id}`);
       }
       if (liveSessionPromise) {
+        const buffered = pendingAudioChunks;
+        pendingAudioChunks = [];
         liveSessionPromise.then(s => {
+          for (const chunk of buffered) {
+            s.sendRealtimeInput({ audio: { data: chunk, mimeType: 'audio/pcm;rate=16000' } });
+          }
           s.sendRealtimeInput({
             audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
           });
@@ -954,6 +960,10 @@ async function startServer() {
           console.error("Error sending audio chunk:", err);
           logToFile("Error sending audio chunk: " + err.message);
         });
+      } else {
+        if (pendingAudioChunks.length < 50) {
+          pendingAudioChunks.push(base64Data);
+        }
       }
     });
 
