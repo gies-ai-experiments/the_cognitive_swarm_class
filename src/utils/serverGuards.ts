@@ -44,3 +44,9 @@ export function validateVote({ currentVotes, credits, delta }: VoteValidation): 
   if (credits - cost < 0) return { allowed: false, newVotes: currentVotes, cost: 0 };
   return { allowed: true, newVotes, cost };
 }
+
+export function sanitizeIdeaInput(text: unknown, maxLength = 500): { valid: boolean; text: string } {
+  if (typeof text !== 'string') return { valid: false, text: '' };
+  const trimmed = text.trim().slice(0, maxLength);
+  return { valid: trimmed.length > 0, text: trimmed };
+}

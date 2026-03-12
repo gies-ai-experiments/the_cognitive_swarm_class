@@ -15,7 +15,7 @@ import {
 } from "./src/utils/swarmPolicy.ts";
 import { buildFallbackArtifact, getDiagramLabel, inferDiagramType } from "./src/utils/artifactPolicy.ts";
 import type { ArtifactDiagramType, ArtifactIdea } from "./src/utils/artifactPolicy.ts";
-import { isAdmin, isValidPhase, INITIAL_CREDITS, validateVote } from './src/utils/serverGuards.ts';
+import { isAdmin, isValidPhase, INITIAL_CREDITS, validateVote, sanitizeIdeaInput } from './src/utils/serverGuards.ts';
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -944,6 +944,10 @@ async function startServer() {
 
     // Ingestion Task: Receive new ideas from clients (extracted via Gemini)
     socket.on("add_idea", (idea: { id?: string, text: string, cluster: string, authorName?: string }) => {
+      const sanitized = sanitizeIdeaInput(idea.text);
+      if (!sanitized.valid) return;
+      const clusterSanitized = sanitizeIdeaInput(idea.cluster || 'General', 100);
+
       const initialPosition = [
         (Math.random() - 0.5) * 20,
         (Math.random() - 0.5) * 20,
@@ -952,9 +956,9 @@ async function startServer() {
 
       const newIdea = {
         id: idea.id || Math.random().toString(36).substring(2, 9),
-        text: idea.text,
+        text: sanitized.text,
         weight: 1, // Initial weight
-        cluster: idea.cluster || 'General',
+        cluster: clusterSanitized.text,
         authorId: socket.id,
         authorName: idea.authorName || 'Anonymous Node',
         initialPosition,
@@ -1011,10 +1015,14 @@ async function startServer() {
 
     // Edit Idea Task
     socket.on("edit_idea", (data: { id: string, text: string, cluster: string, textChanged?: boolean }) => {
+      const sanitizedText = sanitizeIdeaInput(data.text);
+      if (!sanitizedText.valid) return;
+      const sanitizedCluster = sanitizeIdeaInput(data.cluster || 'General', 100);
+
       const idea = state.ideas.find(i => i.id === data.id);
       if (idea) {
-        idea.text = data.text;
-        idea.cluster = data.cluster;
+        idea.text = sanitizedText.text;
+        idea.cluster = sanitizedCluster.text;
         
         if (data.textChanged) {
           getAI().models.embedContent({

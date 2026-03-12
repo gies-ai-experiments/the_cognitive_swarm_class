@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isValidPhase, isAdmin, computeQuadraticCost, validateVote } from '../src/utils/serverGuards.ts';
+import { isValidPhase, isAdmin, computeQuadraticCost, validateVote, sanitizeIdeaInput } from '../src/utils/serverGuards.ts';
 
 test('isValidPhase accepts only the three valid phases', () => {
   assert.equal(isValidPhase('divergent'), true);
@@ -51,4 +51,20 @@ test('validateVote allows downvotes that refund credits', () => {
   assert.equal(result.allowed, true);
   assert.equal(result.newVotes, 2);
   assert.equal(result.cost, -5);
+});
+
+test('sanitizeIdeaInput trims and truncates text', () => {
+  assert.equal(sanitizeIdeaInput('  hello  ', 500).text, 'hello');
+  assert.equal(sanitizeIdeaInput('a'.repeat(600), 500).text, 'a'.repeat(500));
+});
+
+test('sanitizeIdeaInput rejects empty text', () => {
+  assert.equal(sanitizeIdeaInput('', 500).valid, false);
+  assert.equal(sanitizeIdeaInput('   ', 500).valid, false);
+});
+
+test('sanitizeIdeaInput accepts valid text', () => {
+  const result = sanitizeIdeaInput('Great idea', 500);
+  assert.equal(result.valid, true);
+  assert.equal(result.text, 'Great idea');
 });
