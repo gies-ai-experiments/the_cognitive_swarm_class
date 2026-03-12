@@ -304,6 +304,10 @@ export default function App() {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
+      if (playbackAudioContextRef.current && playbackAudioContextRef.current.state !== 'closed') {
+        playbackAudioContextRef.current.close();
+        playbackAudioContextRef.current = null;
+      }
     });
 
     return () => {

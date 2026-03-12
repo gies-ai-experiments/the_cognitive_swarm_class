@@ -971,8 +971,10 @@ async function startServer() {
             audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
           });
         }).catch(err => {
+          // Re-queue chunks on failure so they aren't lost
+          pendingAudioChunks = [...buffered, base64Data, ...pendingAudioChunks].slice(0, 50);
           console.error("Error sending audio chunk:", err);
-          logToFile("Error sending audio chunk: " + err.message);
+          logToFile("Error sending audio chunk, re-queued: " + err.message);
         });
       } else {
         if (pendingAudioChunks.length < 50) {
