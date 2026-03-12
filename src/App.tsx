@@ -304,10 +304,9 @@ export default function App() {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
-      if (playbackAudioContextRef.current && playbackAudioContextRef.current.state !== 'closed') {
-        playbackAudioContextRef.current.close();
-        playbackAudioContextRef.current = null;
-      }
+      // Do NOT close playbackAudioContextRef here — Gemini may still be
+      // streaming audio responses that need to finish playing back.
+      // Playback context is only cleaned up on component unmount.
     });
 
     return () => {
