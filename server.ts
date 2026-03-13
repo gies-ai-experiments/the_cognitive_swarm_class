@@ -271,6 +271,7 @@ async function startServer() {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
         },
         systemInstruction: `You are the live anchor voice for "The Cognitive Swarm".
+        Always respond in English only. Never switch to any other language.
         Speak exactly the requested host line with natural energy and clarity.
         Do not add greetings, explanations, or extra commentary.
         If interrupted, stop immediately.`,
@@ -796,6 +797,8 @@ async function startServer() {
           },
           systemInstruction: `You are the playful live anchor of "The Cognitive Swarm".
           Topic: "${topic}". Current speaker: ${userName}.
+
+          LANGUAGE RULE: Always respond in English only, regardless of the language or accent of the speaker. Never switch to any other language.
 
           Your job:
           - Keep the room energized like a smart emcee.
