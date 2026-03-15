@@ -19,8 +19,30 @@ permissions:
   pull-requests: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          TERRAFORM_WIF_PROVIDER: ${{ vars.TERRAFORM_WIF_PROVIDER }}
+          TERRAFORM_SERVICE_ACCOUNT: ${{ vars.TERRAFORM_SERVICE_ACCOUNT }}
+          TERRAFORM_STATE_BUCKET: ${{ vars.TERRAFORM_STATE_BUCKET }}
+          TERRAFORM_STATE_PREFIX: ${{ vars.TERRAFORM_STATE_PREFIX }}
+        run: |
+          configured=true
+          for required_var in TERRAFORM_WIF_PROVIDER TERRAFORM_SERVICE_ACCOUNT TERRAFORM_STATE_BUCKET TERRAFORM_STATE_PREFIX; do
+            if [ -z "${!required_var}" ]; then
+              echo "::notice::Skipping terraform workflow until ${required_var} is configured."
+              configured=false
+            fi
+          done
+          echo "configured=${configured}" >> "$GITHUB_OUTPUT"
+
   plan:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && needs.preflight.outputs.configured == 'true'
+    needs: preflight
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -57,7 +79,8 @@ jobs:
       - run: terraform plan -var-file="environments/${{ matrix.terraform_env }}.tfvars"
 
   apply:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.preflight.outputs.configured == 'true'
+    needs: preflight
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
