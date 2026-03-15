@@ -3,6 +3,21 @@ output "artifact_registry_repository" {
   description = "Artifact Registry repository name."
 }
 
+output "project_id" {
+  value       = var.project_id
+  description = "Google Cloud project ID."
+}
+
+output "region" {
+  value       = var.region
+  description = "Primary deployment region."
+}
+
+output "app_environment" {
+  value       = var.environment
+  description = "Application environment name."
+}
+
 output "cloud_run_service_name" {
   value       = google_cloud_run_v2_service.app.name
   description = "Cloud Run service name."
@@ -36,6 +51,21 @@ output "redis_host" {
 output "redis_port" {
   value       = google_redis_instance.cache.port
   description = "Memorystore port."
+}
+
+output "firestore_collection" {
+  value       = var.firestore_collection
+  description = "Firestore collection name."
+}
+
+output "min_instances" {
+  value       = var.min_instances
+  description = "Minimum Cloud Run instances."
+}
+
+output "max_instances" {
+  value       = var.max_instances
+  description = "Maximum Cloud Run instances."
 }
 
 output "vpc_connector_name" {

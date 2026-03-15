@@ -13,6 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: read
   id-token: write
   pull-requests: write
@@ -21,6 +22,15 @@ jobs:
   plan:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - terraform_env: staging
+            github_environment: staging
+          - terraform_env: prod
+            github_environment: production
+    environment: ${{ matrix.github_environment }}
     defaults:
       run:
         working-directory: infra/terraform
@@ -34,15 +44,30 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      - run: terraform init
+      - name: Render tfvars
+        run: ../render-terraform-tfvars.sh "${{ matrix.terraform_env }}" "environments/${{ matrix.terraform_env }}.tfvars"
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          GITHUB_REPO: ${{ github.repository }}
+
+      - run: terraform init -reconfigure -backend-config="bucket=${{ vars.TERRAFORM_STATE_BUCKET }}" -backend-config="prefix=${{ vars.TERRAFORM_STATE_PREFIX }}/${{ matrix.terraform_env }}"
       - run: terraform fmt -check
       - run: terraform validate
-      - run: terraform plan -var-file="environments/${{ vars.TERRAFORM_ENVIRONMENT }}.tfvars"
+      - run: terraform plan -var-file="environments/${{ matrix.terraform_env }}.tfvars"
 
   apply:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    environment: infrastructure
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - terraform_env: staging
+            github_environment: staging
+          - terraform_env: prod
+            github_environment: production
+    environment: ${{ matrix.github_environment }}
     defaults:
       run:
         working-directory: infra/terraform
@@ -56,5 +81,17 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      - run: terraform init
-      - run: terraform apply -auto-approve -var-file="environments/${{ vars.TERRAFORM_ENVIRONMENT }}.tfvars"
+      - name: Render tfvars
+        run: ../render-terraform-tfvars.sh "${{ matrix.terraform_env }}" "environments/${{ matrix.terraform_env }}.tfvars"
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          GITHUB_REPO: ${{ github.repository }}
+
+      - run: terraform init -reconfigure -backend-config="bucket=${{ vars.TERRAFORM_STATE_BUCKET }}" -backend-config="prefix=${{ vars.TERRAFORM_STATE_PREFIX }}/${{ matrix.terraform_env }}"
+      - run: terraform apply -auto-approve -var-file="environments/${{ matrix.terraform_env }}.tfvars"
+
+      - name: Sync GitHub variables from Terraform outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ../sync-github-variables-from-terraform.sh "${{ matrix.terraform_env }}" "${{ matrix.github_environment }}"

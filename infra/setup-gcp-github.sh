@@ -1,17 +1,31 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # Setup Script for The Cognitive Swarm Infrastructure
-# This script configures GCP, executes Terraform, and sets up GitHub Secrets/Variables
+# This script configures GCP, bootstraps a remote Terraform backend, applies one
+# environment, and syncs GitHub Actions variables from Terraform outputs.
 
 if [ -z "$1" ]; then
-    echo "Usage: ./infra/setup-gcp-github.sh <YOUR_GCP_PROJECT_ID>"
+    echo "Usage: ./infra/setup-gcp-github.sh <YOUR_GCP_PROJECT_ID> [staging|prod]"
     exit 1
 fi
 
 export GOOGLE_CLOUD_PROJECT=$1
 export REGION="us-central1"
 export GITHUB_REPO="$(git config --get remote.origin.url | sed -n 's#.*/\(.*\)/\(.*\)\.git#\1/\2#p' || echo "keshavdalmia10/the_cognitive_swarm")"
+export TARGET_ENVIRONMENT="${2:-staging}"
+export TERRAFORM_STATE_BUCKET="${TERRAFORM_STATE_BUCKET:-${GOOGLE_CLOUD_PROJECT}-cognitive-swarm-tfstate}"
+export TERRAFORM_STATE_PREFIX="${TERRAFORM_STATE_PREFIX:-cognitive-swarm}"
+export TERRAFORM_CI_WIF_PROVIDER="${TERRAFORM_CI_WIF_PROVIDER:-}"
+export TERRAFORM_CI_SERVICE_ACCOUNT="${TERRAFORM_CI_SERVICE_ACCOUNT:-}"
+
+case "$TARGET_ENVIRONMENT" in
+  staging|prod) ;;
+  *)
+    echo "Error: environment must be 'staging' or 'prod'."
+    exit 1
+    ;;
+esac
 
 echo "====================================================="
 echo "  Setting up Infrastructure for $GOOGLE_CLOUD_PROJECT"
@@ -49,6 +63,7 @@ gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   compute.googleapis.com \
+  storage.googleapis.com \
   vpcaccess.googleapis.com \
   redis.googleapis.com \
   firestore.googleapis.com
@@ -76,83 +91,69 @@ else
     fi
 fi
 
-# Create tfvars
-echo "Generating terraform variables..."
-cat <<EOF > infra/terraform/environments/staging.tfvars
-project_id               = "${GOOGLE_CLOUD_PROJECT}"
-environment              = "staging"
-region                   = "${REGION}"
-github_repository        = "${GITHUB_REPO}"
-service_name             = "cognitive-swarm-staging"
-artifact_registry_repository_id = "cognitive-swarm"
-image                    = "${REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/cognitive-swarm/the-cognitive-swarm:bootstrap"
-inject_gemini_secret     = true
-min_instances            = 1
-max_instances            = 10
-redis_tier               = "BASIC"
-redis_memory_gb          = 1
-EOF
+echo "Ensuring remote Terraform state bucket exists..."
+if ! gcloud storage buckets describe "gs://${TERRAFORM_STATE_BUCKET}" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${TERRAFORM_STATE_BUCKET}" \
+    --project="${GOOGLE_CLOUD_PROJECT}" \
+    --location="${REGION}" \
+    --uniform-bucket-level-access
+fi
+gcloud storage buckets update "gs://${TERRAFORM_STATE_BUCKET}" --versioning >/dev/null
 
-cat <<EOF > infra/terraform/environments/prod.tfvars
-project_id               = "${GOOGLE_CLOUD_PROJECT}"
-environment              = "prod"
-region                   = "${REGION}"
-github_repository        = "${GITHUB_REPO}"
-service_name             = "cognitive-swarm-prod"
-artifact_registry_repository_id = "cognitive-swarm"
-image                    = "${REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/cognitive-swarm/the-cognitive-swarm:bootstrap"
-inject_gemini_secret     = true
-min_instances            = 2
-max_instances            = 20
-redis_tier               = "STANDARD_HA"
-redis_memory_gb          = 5
-EOF
+echo "Rendering terraform variables for ${TARGET_ENVIRONMENT}..."
+./infra/render-terraform-tfvars.sh "${TARGET_ENVIRONMENT}" "infra/terraform/environments/${TARGET_ENVIRONMENT}.tfvars"
 
 # Terraform
-echo "Applying terraform for staging environment (required for initial bootstrap & WIF)..."
+echo "Applying terraform for ${TARGET_ENVIRONMENT} environment..."
 cd infra/terraform
-terraform init
-terraform apply -auto-approve -var-file=environments/staging.tfvars
+remote_state_path="gs://${TERRAFORM_STATE_BUCKET}/${TERRAFORM_STATE_PREFIX}/${TARGET_ENVIRONMENT}/default.tfstate"
+if ! gcloud storage ls "$remote_state_path" >/dev/null 2>&1; then
+  for candidate in "state/${TARGET_ENVIRONMENT}.tfstate" "terraform.tfstate"; do
+    if [ -f "$candidate" ]; then
+      echo "Migrating existing local state from ${candidate} to ${remote_state_path}..."
+      gcloud storage cp "$candidate" "$remote_state_path" >/dev/null
+      break
+    fi
+  done
+fi
+
+terraform init \
+  -reconfigure \
+  -backend-config="bucket=${TERRAFORM_STATE_BUCKET}" \
+  -backend-config="prefix=${TERRAFORM_STATE_PREFIX}/${TARGET_ENVIRONMENT}"
+terraform apply -auto-approve -var-file="environments/${TARGET_ENVIRONMENT}.tfvars"
 
 # Wait for services to fully provision
 sleep 5
 
-# Set GitHub Vars if GH CLI available
 if [ "$GH_CLI_AVAILABLE" = true ]; then
-  echo "Setting GitHub Actions Variables and Secrets via Terraform outputs..."
-  
-  # Expected Variables
-  # GCP_PROJECT_ID, GCP_REGION, ARTIFACT_REGISTRY_REPOSITORY, DEPLOY_WIF_PROVIDER, DEPLOY_SERVICE_ACCOUNT
-  
-  # For staging/prod:
-  # CLOUD_RUN_SERVICE_STAGING, RUNTIME_SERVICE_ACCOUNT_STAGING, VPC_CONNECTOR_STAGING, FIRESTORE_COLLECTION, REDIS_HOST_STAGING, REDIS_PORT_STAGING
-  # MIN_INSTANCES_STAGING, MAX_INSTANCES_STAGING
-  
-  gh variable set GCP_PROJECT_ID --body "$GOOGLE_CLOUD_PROJECT"
-  gh variable set GCP_REGION --body "$REGION"
-  gh variable set ARTIFACT_REGISTRY_REPOSITORY --body "cognitive-swarm"
-  gh variable set DEPLOY_WIF_PROVIDER --body "$(terraform output -raw deploy_wif_provider_name)"
-  gh variable set DEPLOY_SERVICE_ACCOUNT --body "$(terraform output -raw deploy_service_account_email)"
-  gh variable set GEMINI_SECRET_ID --body "gemini-api-key"
-  gh variable set FIRESTORE_COLLECTION --body "cognitive_swarm_sessions"
-  
-  gh variable set CLOUD_RUN_SERVICE_STAGING --body "cognitive-swarm-staging" -e staging
-  gh variable set RUNTIME_SERVICE_ACCOUNT_STAGING --body "$(terraform output -raw runtime_service_account_email)" -e staging
-  gh variable set VPC_CONNECTOR_STAGING --body "$(terraform output -raw vpc_connector_id)" -e staging
-  gh variable set REDIS_HOST_STAGING --body "$(terraform output -raw redis_host)" -e staging
-  gh variable set REDIS_PORT_STAGING --body "$(terraform output -raw redis_port)" -e staging
-  gh variable set MIN_INSTANCES_STAGING --body "1" -e staging
-  gh variable set MAX_INSTANCES_STAGING --body "10" -e staging
+  echo "Saving Terraform backend settings to GitHub repository variables..."
+  gh variable set TERRAFORM_STATE_BUCKET --body "${TERRAFORM_STATE_BUCKET}"
+  gh variable set TERRAFORM_STATE_PREFIX --body "${TERRAFORM_STATE_PREFIX}"
+  if [ -n "${TERRAFORM_CI_WIF_PROVIDER}" ] && [ -n "${TERRAFORM_CI_SERVICE_ACCOUNT}" ]; then
+    gh variable set TERRAFORM_WIF_PROVIDER --body "${TERRAFORM_CI_WIF_PROVIDER}"
+    gh variable set TERRAFORM_SERVICE_ACCOUNT --body "${TERRAFORM_CI_SERVICE_ACCOUNT}"
+  else
+    echo "Warning: TERRAFORM_CI_WIF_PROVIDER / TERRAFORM_CI_SERVICE_ACCOUNT not set; terraform.yml auth variables were not updated."
+  fi
 
-  echo "Staging environment variables set successfully in GitHub repository!"
+  echo "Syncing GitHub Actions variables from Terraform outputs..."
+  github_environment="staging"
+  if [ "$TARGET_ENVIRONMENT" = "prod" ]; then
+    github_environment="production"
+  fi
+  ../sync-github-variables-from-terraform.sh "$TARGET_ENVIRONMENT" "$github_environment"
 else
   echo -e "\n======================"
   echo "Please set the following GitHub Variables manually:"
   echo "- GCP_PROJECT_ID: $GOOGLE_CLOUD_PROJECT"
   echo "- GCP_REGION: $REGION"
+  echo "- TERRAFORM_STATE_BUCKET: $TERRAFORM_STATE_BUCKET"
+  echo "- TERRAFORM_STATE_PREFIX: $TERRAFORM_STATE_PREFIX"
+  echo "- TERRAFORM_WIF_PROVIDER / TERRAFORM_SERVICE_ACCOUNT (for terraform.yml auth)"
+  echo "- Then run ./infra/sync-github-variables-from-terraform.sh $TARGET_ENVIRONMENT"
   echo "Terraform deploy outputs are:"
   terraform output
-  echo "Map these to your deploy workflows for staging and prod!"
 fi
 
-echo "Setup complete! Once variables are in GitHub, you can push to main to trigger the deploy workflow."
+echo "Setup complete for ${TARGET_ENVIRONMENT}. Once variables are in GitHub, you can push to main to trigger the deploy workflow."
