@@ -111,6 +111,7 @@ jobs:
       - run: terraform apply -auto-approve -var-file="environments/${{ matrix.terraform_env }}.tfvars"
 
       - name: Sync GitHub variables from Terraform outputs
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: ../sync-github-variables-from-terraform.sh "${{ matrix.terraform_env }}" "${{ matrix.github_environment }}"
