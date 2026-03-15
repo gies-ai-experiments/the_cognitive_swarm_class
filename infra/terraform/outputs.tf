@@ -1,5 +1,5 @@
 output "artifact_registry_repository" {
-  value       = google_artifact_registry_repository.app.name
+  value       = var.artifact_registry_repository_id
   description = "Artifact Registry repository name."
 }
 
@@ -84,6 +84,6 @@ output "vpc_connector_name" {
 }
 
 output "gemini_secret_id" {
-  value       = google_secret_manager_secret.gemini_api_key.secret_id
+  value       = var.gemini_secret_id
   description = "Gemini API key secret ID."
 }

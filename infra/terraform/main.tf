@@ -50,13 +50,14 @@ locals {
 }
 
 resource "google_project_service" "apis" {
-  for_each           = local.enabled_services
+  for_each           = var.manage_project_services ? local.enabled_services : toset([])
   project            = var.project_id
   service            = each.value
   disable_on_destroy = false
 }
 
 resource "google_artifact_registry_repository" "app" {
+  count         = var.manage_shared_resources ? 1 : 0
   location      = var.region
   repository_id = var.artifact_registry_repository_id
   description   = "Container repository for ${local.service_name}"
@@ -66,6 +67,7 @@ resource "google_artifact_registry_repository" "app" {
 }
 
 resource "google_secret_manager_secret" "gemini_api_key" {
+  count     = var.manage_shared_resources ? 1 : 0
   secret_id = var.gemini_secret_id
 
   replication {
@@ -78,13 +80,13 @@ resource "google_secret_manager_secret" "gemini_api_key" {
 }
 
 resource "google_secret_manager_secret_version" "gemini_api_key" {
-  count       = var.gemini_api_key_value != "" ? 1 : 0
-  secret      = google_secret_manager_secret.gemini_api_key.id
+  count       = var.manage_shared_resources && var.gemini_api_key_value != "" ? 1 : 0
+  secret      = google_secret_manager_secret.gemini_api_key[0].id
   secret_data = var.gemini_api_key_value
 }
 
 resource "google_firestore_database" "default" {
-  count                   = var.create_firestore_database ? 1 : 0
+  count                   = var.manage_shared_resources && var.create_firestore_database ? 1 : 0
   project                 = var.project_id
   name                    = "(default)"
   location_id             = var.firestore_location
@@ -168,7 +170,7 @@ resource "google_project_iam_member" "deployer_run_admin" {
 resource "google_artifact_registry_repository_iam_member" "deployer_artifact_writer" {
   project    = var.project_id
   location   = var.region
-  repository = google_artifact_registry_repository.app.repository_id
+  repository = var.artifact_registry_repository_id
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.deployer.email}"
 }
@@ -239,6 +241,8 @@ resource "google_cloud_run_v2_service" "app" {
     ignore_changes = [
       client,
       client_version,
+      deletion_protection,
+      labels,
       scaling,
       template,
       traffic,
@@ -290,7 +294,7 @@ resource "google_cloud_run_v2_service" "app" {
           name = "GEMINI_API_KEY"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.gemini_api_key.secret_id
+              secret  = var.gemini_secret_id
               version = "latest"
             }
           }
@@ -305,8 +309,6 @@ resource "google_cloud_run_v2_service" "app" {
   }
 
   depends_on = [
-    google_project_service.apis,
-    google_artifact_registry_repository.app,
     google_redis_instance.cache,
     google_vpc_access_connector.serverless,
     google_project_iam_member.runtime_secret_accessor,

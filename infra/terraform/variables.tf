@@ -163,3 +163,15 @@ variable "bootstrap_terraform_ci" {
   description = "Create the Terraform CI service account and grant it project roles."
   default     = false
 }
+
+variable "manage_project_services" {
+  type        = bool
+  description = "Manage project-level API enablement from this state."
+  default     = true
+}
+
+variable "manage_shared_resources" {
+  type        = bool
+  description = "Manage shared project resources such as Artifact Registry and Secret Manager from this state."
+  default     = true
+}
