@@ -74,6 +74,159 @@ function parseSampleRateFromMimeType(mimeType?: string | null, fallback = DEFAUL
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function encodePcmBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+function createScriptProcessorCapture(
+  audioContext: AudioContext,
+  source: MediaStreamAudioSourceNode,
+  targetSampleRate: number,
+  onChunk: (buffer: ArrayBuffer) => void,
+) {
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const silentGain = audioContext.createGain();
+  silentGain.gain.value = 0;
+
+  const inputSampleRate = audioContext.sampleRate;
+  let sourceSamples: number[] = [];
+  let readIndex = 0;
+  let outputBuffer = new Int16Array(4096);
+  let outputIndex = 0;
+
+  const flushOutputBuffer = (force = false) => {
+    if (outputIndex === 0) return;
+    if (!force && outputIndex < outputBuffer.length) return;
+
+    const chunk = outputBuffer.slice(0, outputIndex);
+    onChunk(chunk.buffer);
+    outputIndex = 0;
+  };
+
+  const pushOutputSample = (sample: number) => {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    outputBuffer[outputIndex++] =
+      clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
+    if (outputIndex >= outputBuffer.length) {
+      flushOutputBuffer(true);
+    }
+  };
+
+  const drainSourceSamples = (force = false) => {
+    if (inputSampleRate === targetSampleRate) {
+      for (let i = 0; i < sourceSamples.length; i++) {
+        pushOutputSample(sourceSamples[i]);
+      }
+      sourceSamples = [];
+      readIndex = 0;
+      if (force) {
+        flushOutputBuffer(true);
+      }
+      return;
+    }
+
+    const step = inputSampleRate / targetSampleRate;
+    while (readIndex + 1 < sourceSamples.length) {
+      const leftIndex = Math.floor(readIndex);
+      const rightIndex = leftIndex + 1;
+      const fraction = readIndex - leftIndex;
+      const interpolatedSample =
+        sourceSamples[leftIndex] +
+        (sourceSamples[rightIndex] - sourceSamples[leftIndex]) * fraction;
+
+      pushOutputSample(interpolatedSample);
+      readIndex += step;
+    }
+
+    if (force && sourceSamples.length > 0) {
+      const lastSample = sourceSamples[sourceSamples.length - 1];
+      while (readIndex < sourceSamples.length) {
+        pushOutputSample(lastSample);
+        readIndex += step;
+      }
+    }
+
+    const consumedSamples = Math.floor(readIndex);
+    if (consumedSamples > 0) {
+      sourceSamples = sourceSamples.slice(consumedSamples);
+      readIndex -= consumedSamples;
+    }
+
+    if (force) {
+      sourceSamples = [];
+      readIndex = 0;
+      flushOutputBuffer(true);
+    }
+  };
+
+  processor.onaudioprocess = (event) => {
+    const input = event.inputBuffer.getChannelData(0);
+    for (let i = 0; i < input.length; i++) {
+      sourceSamples.push(input[i]);
+    }
+    drainSourceSamples(false);
+  };
+
+  source.connect(processor);
+  processor.connect(silentGain);
+  silentGain.connect(audioContext.destination);
+
+  return {
+    node: processor as AudioNode,
+    flush: () => {
+      drainSourceSamples(true);
+    },
+    disconnect: () => {
+      processor.onaudioprocess = null;
+      try {
+        source.disconnect(processor);
+      } catch (_error) {}
+      try {
+        processor.disconnect();
+      } catch (_error) {}
+      try {
+        silentGain.disconnect();
+      } catch (_error) {}
+    },
+  };
+}
+
+async function waitForSocketConnection(activeSocket: Socket, timeoutMs = 4000) {
+  if (activeSocket.connected) return;
+
+  await new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('Unable to reach the server. Please try again.'));
+    }, timeoutMs);
+
+    const handleConnect = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleConnectError = () => {
+      cleanup();
+      reject(new Error('Unable to reach the server. Please try again.'));
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      activeSocket.off('connect', handleConnect);
+      activeSocket.off('connect_error', handleConnectError);
+    };
+
+    activeSocket.on('connect', handleConnect);
+    activeSocket.on('connect_error', handleConnectError);
+    activeSocket.connect();
+  });
+}
+
 export default function App() {
   const [entryMode, setEntryMode] = useState<EntryMode>('admin');
   const [userName, setUserName] = useState('');
@@ -99,6 +252,7 @@ export default function App() {
   useEffect(() => { ideasRef.current = ideas; }, [ideas]);
   const [artifact, setArtifact] = useState<ArtifactData | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isStartingAudio, setIsStartingAudio] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -115,6 +269,10 @@ export default function App() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const captureNodeRef = useRef<AudioNode | null>(null);
+  const captureCleanupRef = useRef<(() => void) | null>(null);
+  const captureFlushRef = useRef<(() => void) | null>(null);
+  const recordingSetupIdRef = useRef(0);
   const stopSimulationRef = useRef<(() => void) | null>(null);
   const audioQueueRef = useRef<AudioBuffer[]>([]);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -128,6 +286,12 @@ export default function App() {
   const anchorAnnouncementIdRef = useRef(0);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedTextRef = useRef<Record<string, string>>({});
+  const audioStartTimeoutRef = useRef<number | null>(null);
+  const isStartingAudioRef = useRef(false);
+
+  useEffect(() => {
+    isStartingAudioRef.current = isStartingAudio;
+  }, [isStartingAudio]);
 
   const ensurePlaybackAudioContext = async () => {
     const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
@@ -212,13 +376,34 @@ export default function App() {
   };
 
   const stopAudioCapture = () => {
+    recordingSetupIdRef.current += 1;
     setIsRecording(false);
+    setIsStartingAudio(false);
+    if (audioStartTimeoutRef.current) {
+      window.clearTimeout(audioStartTimeoutRef.current);
+      audioStartTimeoutRef.current = null;
+    }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
       mediaStreamRef.current = null;
     }
+    if (captureFlushRef.current) {
+      captureFlushRef.current = null;
+    }
+    if (captureCleanupRef.current) {
+      captureCleanupRef.current();
+      captureCleanupRef.current = null;
+    }
+    if (captureNodeRef.current) {
+      try {
+        captureNodeRef.current.disconnect();
+      } catch (_error) {}
+      captureNodeRef.current = null;
+    }
     if (workletNodeRef.current) {
-      workletNodeRef.current.disconnect();
+      try {
+        workletNodeRef.current.disconnect();
+      } catch (_error) {}
       workletNodeRef.current = null;
     }
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
@@ -292,6 +477,26 @@ export default function App() {
     const newSocket = io();
     setSocket(newSocket);
 
+    newSocket.on('connect', () => {
+      setIsJoiningRoom(false);
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('Socket connection failed:', error);
+      setIsJoiningRoom(false);
+      if (!roleRef.current) {
+        setRoomError('Unable to reach the server. Please retry.');
+      }
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.warn('Socket disconnected:', reason);
+      setIsJoiningRoom(false);
+      if (!roleRef.current) {
+        setRoomError('Connection to the server was lost. Try again.');
+      }
+    });
+
     newSocket.on('state_sync', (payload: StateSyncPayload) => {
       setActiveRoom(payload.room);
       setUserName(payload.currentUser.userName || userNameRef.current);
@@ -360,8 +565,21 @@ export default function App() {
 
     newSocket.on('error', (err: any) => {
       console.error("Server error:", err);
+      if (isStartingAudioRef.current) {
+        stopAudioCapture();
+      }
       setAudioError(err.message || "Unknown server error");
       setIsForging(false);
+    });
+
+    newSocket.on('audio_session_started', () => {
+      if (audioStartTimeoutRef.current) {
+        window.clearTimeout(audioStartTimeoutRef.current);
+        audioStartTimeoutRef.current = null;
+      }
+      setIsStartingAudio(false);
+      setIsRecording(true);
+      setAudioError(null);
     });
 
     newSocket.on('ideas_batch_added', (newIdeas: any[]) => {
@@ -460,7 +678,11 @@ export default function App() {
     });
 
     newSocket.on('audio_session_closed', () => {
+      const closedDuringStartup = isStartingAudioRef.current;
       stopAudioCapture();
+      if (closedDuringStartup) {
+        setAudioError('Audio session closed before the server confirmed startup.');
+      }
       // Do NOT close playbackAudioContextRef here — Gemini may still be
       // streaming audio responses that need to finish playing back.
       // Playback context is only cleaned up on component unmount.
@@ -482,10 +704,10 @@ export default function App() {
 
   // Gemini Live API Connection
   const toggleRecording = async () => {
-    if (isRecording) {
+    if (isRecording || isStartingAudio) {
       // Stop recording
-      if (workletNodeRef.current) {
-        workletNodeRef.current.port.postMessage({ type: 'flush' });
+      if (captureFlushRef.current) {
+        captureFlushRef.current();
         await new Promise((resolve) => window.setTimeout(resolve, 30));
       }
       socket?.emit('stop_audio_session');
@@ -500,7 +722,13 @@ export default function App() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error("Browser does not support audio recording or permissions are missing.");
       }
+      const recordingSetupId = recordingSetupIdRef.current + 1;
+      recordingSetupIdRef.current = recordingSetupId;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (recordingSetupIdRef.current !== recordingSetupId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
 
       const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
@@ -513,49 +741,93 @@ export default function App() {
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
       }
+      if (recordingSetupIdRef.current !== recordingSetupId || audioContext.state === 'closed') {
+        throw new Error('Microphone setup was interrupted. Please try again.');
+      }
 
       const source = audioContext.createMediaStreamSource(stream);
-      
-      await audioContext.audioWorklet.addModule('/pcm-processor.js');
-      
-      const workletNode = new AudioWorkletNode(audioContext, 'pcm-processor', {
-        processorOptions: {
-          targetSampleRate: INPUT_SAMPLE_RATE,
-        },
-      });
-      workletNodeRef.current = workletNode;
 
       if (audioContext.sampleRate !== INPUT_SAMPLE_RATE) {
         console.warn(`Microphone context is running at ${audioContext.sampleRate} Hz and will be resampled to ${INPUT_SAMPLE_RATE} Hz before upload.`);
       }
 
-      const silentGain = audioContext.createGain();
-      silentGain.gain.value = 0;
-      
-      source.connect(workletNode);
-      workletNode.connect(silentGain);
-      silentGain.connect(audioContext.destination);
-
-      console.log("Emitting start_audio_session");
-      socket?.emit('start_audio_session');
-
-      let chunkCount = 0;
-      workletNode.port.onmessage = (e) => {
-        const buffer = e.data;
-        const bytes = new Uint8Array(buffer);
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64Data = window.btoa(binary);
-        chunkCount++;
-        if (chunkCount % 10 === 0) {
-          console.log("Sent 10 audio chunks");
-        }
+      const emitAudioChunk = (buffer: ArrayBuffer) => {
+        const base64Data = encodePcmBufferToBase64(buffer);
         socket?.emit('audio_chunk', base64Data);
       };
 
-      setIsRecording(true);
+      try {
+        if (!audioContext.audioWorklet) {
+          throw new Error('AudioWorklet is not available in this browser context.');
+        }
+
+        await audioContext.audioWorklet.addModule('/pcm-processor.js');
+        if (recordingSetupIdRef.current !== recordingSetupId || audioContext.state === 'closed') {
+          throw new Error('Microphone setup was interrupted. Please try again.');
+        }
+
+        const workletNode = new AudioWorkletNode(audioContext, 'pcm-processor', {
+          processorOptions: {
+            targetSampleRate: INPUT_SAMPLE_RATE,
+          },
+        });
+        workletNodeRef.current = workletNode;
+        captureNodeRef.current = workletNode;
+        captureFlushRef.current = () => {
+          workletNode.port.postMessage({ type: 'flush' });
+        };
+        captureCleanupRef.current = () => {
+          try {
+            source.disconnect(workletNode);
+          } catch (_error) {}
+        };
+
+        workletNode.port.onmessage = (event) => {
+          emitAudioChunk(event.data);
+        };
+
+        const silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
+        captureCleanupRef.current = () => {
+          try {
+            source.disconnect(workletNode);
+          } catch (_error) {}
+          try {
+            workletNode.disconnect();
+          } catch (_error) {}
+          try {
+            silentGain.disconnect();
+          } catch (_error) {}
+        };
+
+        source.connect(workletNode);
+        workletNode.connect(silentGain);
+        silentGain.connect(audioContext.destination);
+      } catch (workletError) {
+        console.warn('AudioWorklet capture failed. Falling back to ScriptProcessorNode.', workletError);
+        workletNodeRef.current = null;
+        const fallbackCapture = createScriptProcessorCapture(
+          audioContext,
+          source,
+          INPUT_SAMPLE_RATE,
+          emitAudioChunk,
+        );
+        captureNodeRef.current = fallbackCapture.node;
+        captureFlushRef.current = fallbackCapture.flush;
+        captureCleanupRef.current = fallbackCapture.disconnect;
+      }
+
+      console.log("Emitting start_audio_session");
+      socket?.emit('start_audio_session');
+      setIsStartingAudio(true);
+      if (audioStartTimeoutRef.current) {
+        window.clearTimeout(audioStartTimeoutRef.current);
+      }
+      audioStartTimeoutRef.current = window.setTimeout(() => {
+        audioStartTimeoutRef.current = null;
+        stopAudioCapture();
+        setAudioError('Audio session startup timed out waiting for the server.');
+      }, 10000);
       setAudioError(null);
     } catch (err: any) {
       console.error("Failed to start recording:", err);
@@ -629,28 +901,40 @@ export default function App() {
   const isEntryActionDisabled =
     isJoiningRoom || !userName.trim() || (entryMode === 'admin' ? !topic.trim() : !roomCodeInput.trim());
 
-  const handleCreateRoom = () => {
+  const handleCreateRoom = async () => {
     if (!socket || !userName.trim() || !topic.trim()) {
       setRoomError('Display name and topic are required.');
       return;
     }
 
-    setRoomError(null);
-    setRoomNotice(null);
-    setIsJoiningRoom(true);
-    socket.emit('create_room', { userName: userName.trim(), topic: topic.trim() });
+    try {
+      setRoomError(null);
+      setRoomNotice(null);
+      setIsJoiningRoom(true);
+      await waitForSocketConnection(socket);
+      socket.emit('create_room', { userName: userName.trim(), topic: topic.trim() });
+    } catch (error: any) {
+      setRoomError(error.message || 'Unable to reach the server. Please try again.');
+      setIsJoiningRoom(false);
+    }
   };
 
-  const handleJoinRoom = () => {
+  const handleJoinRoom = async () => {
     if (!socket || !userName.trim() || !roomCodeInput.trim()) {
       setRoomError('Display name and room code are required.');
       return;
     }
 
-    setRoomError(null);
-    setRoomNotice(null);
-    setIsJoiningRoom(true);
-    socket.emit('join_room', { userName: userName.trim(), roomCode: roomCodeInput.trim() });
+    try {
+      setRoomError(null);
+      setRoomNotice(null);
+      setIsJoiningRoom(true);
+      await waitForSocketConnection(socket);
+      socket.emit('join_room', { userName: userName.trim(), roomCode: roomCodeInput.trim() });
+    } catch (error: any) {
+      setRoomError(error.message || 'Unable to reach the server. Please try again.');
+      setIsJoiningRoom(false);
+    }
   };
 
   const handleExitRoom = () => {
@@ -803,9 +1087,9 @@ export default function App() {
               onClick={() => {
                 void ensurePlaybackAudioContext();
                 if (entryMode === 'admin') {
-                  handleCreateRoom();
+                  void handleCreateRoom();
                 } else {
-                  handleJoinRoom();
+                  void handleJoinRoom();
                 }
               }}
               disabled={isEntryActionDisabled}
@@ -1006,16 +1290,16 @@ export default function App() {
             )}
 
             <button
-              onClick={toggleRecording}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-all ${focusRingClass} ${
-                isRecording
-                  ? 'border border-red-500/40 bg-red-500/15 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
-                  : 'border border-white/8 bg-white/5 text-white/55 hover:bg-white/8'
-              }`}
-            >
-              {isRecording ? <Mic className="h-3.5 w-3.5 animate-pulse" /> : <MicOff className="h-3.5 w-3.5" />}
-              {isRecording ? 'Live' : 'Join'}
-            </button>
+                onClick={toggleRecording}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-all ${focusRingClass} ${
+                  isRecording || isStartingAudio
+                    ? 'border border-red-500/40 bg-red-500/15 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.2)]'
+                    : 'border border-white/8 bg-white/5 text-white/55 hover:bg-white/8'
+                }`}
+              >
+                {isRecording ? <Mic className="h-3.5 w-3.5 animate-pulse" /> : <MicOff className="h-3.5 w-3.5" />}
+                {isRecording ? 'Live' : isStartingAudio ? 'Connecting...' : 'Join'}
+              </button>
 
             <div className="h-4 w-px bg-white/8" />
 
