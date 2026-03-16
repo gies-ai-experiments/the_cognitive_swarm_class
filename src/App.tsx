@@ -237,6 +237,8 @@ export default function App() {
   useEffect(() => { roleRef.current = role; }, [role]);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [activeRoom, setActiveRoom] = useState<ActiveRoomState | null>(null);
+  const activeRoomRef = useRef<ActiveRoomState | null>(null);
+  useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
   const [roomCodeInput, setRoomCodeInput] = useState('');
   const [roomError, setRoomError] = useState<string | null>(null);
   const [roomNotice, setRoomNotice] = useState<string | null>(null);
@@ -481,6 +483,18 @@ export default function App() {
 
     newSocket.on('connect', () => {
       setIsJoiningRoom(false);
+      // Auto-rejoin room after reconnection
+      const currentRoom = activeRoomRef.current;
+      const currentRole = roleRef.current;
+      const currentUserName = userNameRef.current;
+      if (currentRoom?.code && currentRole && currentUserName) {
+        console.log('Reconnected — rejoining room', currentRoom.code);
+        newSocket.emit('rejoin_room', {
+          roomCode: currentRoom.code,
+          userName: currentUserName,
+          role: currentRole,
+        });
+      }
     });
 
     newSocket.on('connect_error', (error) => {

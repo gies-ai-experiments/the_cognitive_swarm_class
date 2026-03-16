@@ -333,6 +333,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
   }
 
   const roomContexts = new Map<string, RoomContext>();
+  const pendingAdminCloseTimers = new Map<string, NodeJS.Timeout>();
+
+  function cancelPendingAdminClose(roomCode: string) {
+    const timer = pendingAdminCloseTimers.get(roomCode);
+    if (timer) {
+      clearTimeout(timer);
+      pendingAdminCloseTimers.delete(roomCode);
+      console.log(`Cancelled pending admin close for room ${roomCode}`);
+    }
+  }
 
   function getLocalSocketsForRoom(roomCode: string) {
     return Array.from(io.of("/").sockets.values()).filter((socket) => socket.data.roomCode === roomCode);
@@ -1116,6 +1126,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
   }
 
   async function closeRoom(roomCode: string, message = "The admin closed this room.") {
+    cancelPendingAdminClose(roomCode);
     const roomContext = await getRoomContext(roomCode, false);
     if (!roomContext) {
       return;
@@ -1160,7 +1171,23 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
       const snapshot = await roomContext.store.getSnapshot();
       if (snapshot.room.status === "active") {
         if (role === "admin" && snapshot.room.adminSocketId === socket.id) {
-          await closeRoom(roomCode, options.reason || "The admin left the room.");
+          if (options.silent) {
+            // Disconnection (not explicit leave) — give admin time to reconnect
+            const ADMIN_GRACE_PERIOD_MS = 15_000;
+            console.log(`Admin disconnected from room ${roomCode}, starting ${ADMIN_GRACE_PERIOD_MS}ms grace period`);
+            cancelPendingAdminClose(roomCode);
+            pendingAdminCloseTimers.set(
+              roomCode,
+              setTimeout(() => {
+                pendingAdminCloseTimers.delete(roomCode);
+                console.log(`Admin grace period expired for room ${roomCode}, closing room`);
+                void closeRoom(roomCode, options.reason || "The admin left the room.");
+              }, ADMIN_GRACE_PERIOD_MS),
+            );
+          } else {
+            // Explicit leave — close immediately
+            await closeRoom(roomCode, options.reason || "The admin left the room.");
+          }
         } else {
           await roomContext.store.removeParticipant(socket.id);
         }
@@ -1511,6 +1538,66 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
         adminUserName: currentSnapshot.room.adminUserName,
       });
       await emitStateSync(socket, roomContext);
+    });
+
+    socket.on("rejoin_room", async (data: { roomCode: string; userName: string; role: UserRole }) => {
+      const userName = data.userName?.trim();
+      const roomCode = normalizeRoomCode(data.roomCode || "");
+      const role = data.role;
+      if (!userName || !roomCode) {
+        socket.emit("room_error", { message: "Display name and room code are required." });
+        return;
+      }
+
+      if (socket.data.roomCode) {
+        await leaveRoom(socket, { silent: true });
+      }
+
+      const roomContext = await getRoomContext(roomCode, false);
+      if (!roomContext) {
+        socket.emit("room_error", { message: "Room not found." });
+        return;
+      }
+
+      const currentSnapshot = await roomContext.store.getSnapshot();
+      if (currentSnapshot.room.status !== "active") {
+        socket.emit("room_error", { message: "That room is closed." });
+        await cleanupRoomContextIfUnused(roomCode);
+        return;
+      }
+
+      if (role === "admin" && currentSnapshot.room.adminUserName === userName) {
+        // Admin is reconnecting — cancel pending close and update socket ID
+        cancelPendingAdminClose(roomCode);
+        await roomContext.store.mutate((mutableSnapshot) => {
+          mutableSnapshot.room.adminSocketId = socket.id;
+          upsertParticipantRecord(mutableSnapshot, socket.id, userName, "admin");
+        });
+        socket.data.roomCode = roomCode;
+        socket.data.role = "admin";
+        socket.data.userName = userName;
+        await socket.join(roomCode);
+        socket.emit("room_created", {
+          roomCode,
+          adminUserName: currentSnapshot.room.adminUserName,
+        });
+        await emitStateSync(socket, roomContext);
+        console.log(`Admin ${userName} reconnected to room ${roomCode} with new socket ${socket.id}`);
+      } else {
+        // Participant reconnecting
+        await roomContext.store.mutate((mutableSnapshot) => {
+          upsertParticipantRecord(mutableSnapshot, socket.id, userName, "participant");
+        });
+        socket.data.roomCode = roomCode;
+        socket.data.role = "participant";
+        socket.data.userName = userName;
+        await socket.join(roomCode);
+        socket.emit("room_joined", {
+          roomCode,
+          adminUserName: currentSnapshot.room.adminUserName,
+        });
+        await emitStateSync(socket, roomContext);
+      }
     });
 
     socket.on("leave_room", async () => {
