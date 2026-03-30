@@ -13,3 +13,4 @@ infra/terraform/terraform.tfstate.backup
 infra/terraform/state/
 infra/terraform/environments/*.tfvars
 !infra/terraform/environments/*.tfvars.example
+.gstack/

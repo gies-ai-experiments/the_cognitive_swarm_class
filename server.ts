@@ -1856,6 +1856,27 @@ export async function startServer(options: StartServerOptions = {}): Promise<Ser
       void scheduleAutoForge(activeRoom.roomContext);
     });
 
+    socket.on("delete_idea", async (data: { id: string }) => {
+      const activeRoom = await getActiveRoom(socket);
+      if (!activeRoom) return;
+      if (!isAdmin(activeRoom.snapshot.participants[socket.id])) {
+        socket.emit("room_error", { message: "Only the admin can delete ideas." });
+        return;
+      }
+
+      let deleted = false;
+      await activeRoom.roomContext.store.mutate((mutableSnapshot) => {
+        const idx = mutableSnapshot.state.ideas.findIndex((entry) => entry.id === data.id);
+        if (idx === -1) return;
+        mutableSnapshot.state.ideas.splice(idx, 1);
+        deleted = true;
+      });
+
+      if (deleted) {
+        io.to(activeRoom.roomCode).emit("idea_deleted", { id: data.id });
+      }
+    });
+
     socket.on("edit_idea", async (data: { id: string; text: string; cluster: string; textChanged?: boolean }) => {
       const activeRoom = await getActiveRoom(socket);
       if (!activeRoom) return;

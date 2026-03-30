@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import mermaid from 'mermaid';
-import { BrainCircuit, Move, Search, ZoomIn, ZoomOut } from 'lucide-react';
+import { BrainCircuit, Move, Search, ZoomIn, ZoomOut, Maximize2, Minimize2, Download } from 'lucide-react';
 
 export type ArtifactDiagramType = 'erDiagram' | 'flowchart' | 'classDiagram' | 'mindmap' | 'journey';
 
@@ -21,13 +21,57 @@ const LABELS: Record<ArtifactDiagramType, string> = {
 const focusRingClass =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399]/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]';
 
-export default function ArtifactCanvas({ artifact }: { artifact: ArtifactData | null }) {
+export default function ArtifactCanvas({
+  artifact,
+  expanded,
+  onToggleExpand,
+}: {
+  artifact: ArtifactData | null;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
+}) {
   const [svgMarkup, setSvgMarkup] = useState('');
   const [renderError, setRenderError] = useState<string | null>(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragStateRef = useRef<{ x: number; y: number; active: boolean }>({ x: 0, y: 0, active: false });
   const renderCountRef = useRef(0);
+
+  const handleSaveImage = useCallback(() => {
+    if (!svgMarkup) return;
+    const svgEl = document.createElement('div');
+    svgEl.innerHTML = svgMarkup;
+    const svg = svgEl.querySelector('svg');
+    if (!svg) return;
+
+    const viewBox = svg.getAttribute('viewBox')?.split(' ').map(Number);
+    const width = parseFloat(svg.getAttribute('width') || '') || viewBox?.[2] || 800;
+    const height = parseFloat(svg.getAttribute('height') || '') || viewBox?.[3] || 600;
+    const scaleFactor = 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width * scaleFactor;
+    canvas.height = height * scaleFactor;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(svg);
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      const link = document.createElement('a');
+      link.download = `${artifact?.title || 'artifact'}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    };
+    img.src = url;
+  }, [svgMarkup, artifact]);
 
   useEffect(() => {
     mermaid.initialize({
@@ -158,6 +202,24 @@ export default function ArtifactCanvas({ artifact }: { artifact: ArtifactData | 
             <ZoomIn className="h-3 w-3" />
           </button>
           <span className="ml-1 text-[9px] font-mono text-white/30">{(scale * 100).toFixed(0)}%</span>
+          <div className="ml-2 h-4 w-px bg-white/10" />
+          <button
+            onClick={handleSaveImage}
+            disabled={!svgMarkup}
+            className={`${focusRingClass} rounded-lg border border-white/8 bg-white/5 p-1.5 text-white/50 transition-colors hover:bg-white/10 hover:text-white/80 disabled:opacity-30 disabled:cursor-not-allowed`}
+            title="Save as PNG"
+          >
+            <Download className="h-3 w-3" />
+          </button>
+          {onToggleExpand && (
+            <button
+              onClick={onToggleExpand}
+              className={`${focusRingClass} rounded-lg border border-white/8 bg-white/5 p-1.5 text-white/50 transition-colors hover:bg-white/10 hover:text-white/80`}
+              title={expanded ? 'Collapse' : 'Expand'}
+            >
+              {expanded ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+            </button>
+          )}
         </div>
       </div>
 

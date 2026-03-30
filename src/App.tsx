@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Mic, MicOff, Camera, CameraOff, BrainCircuit, Activity, Users, Zap, Bot, AlertTriangle } from 'lucide-react';
+import { Mic, MicOff, Camera, CameraOff, BrainCircuit, Activity, Users, Zap, Bot, AlertTriangle, Send, Trash2 } from 'lucide-react';
 import { motion } from 'motion/react';
 import IdeaSwarm from './components/IdeaSwarm';
 import IdeaVoting from './components/IdeaVoting';
@@ -253,6 +253,7 @@ export default function App() {
   const ideasRef = useRef<any[]>([]);
   useEffect(() => { ideasRef.current = ideas; }, [ideas]);
   const [artifact, setArtifact] = useState<ArtifactData | null>(null);
+  const [artifactExpanded, setArtifactExpanded] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isStartingAudio, setIsStartingAudio] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -623,6 +624,11 @@ export default function App() {
       setIdeas((prev) => prev.map(i => 
         i.id === id ? { ...i, url, urlTitle } : i
       ));
+    });
+
+    newSocket.on('idea_deleted', ({ id }: { id: string }) => {
+      setIdeas((prev) => prev.filter(i => i.id !== id));
+      setSelectedIdeaId((prev) => prev === id ? null : prev);
     });
 
     newSocket.on('edges_updated', (newEdges: any[]) => {
@@ -1357,6 +1363,33 @@ export default function App() {
                   </span>
                 </div>
 
+                <div className="flex max-w-2xl items-center gap-2 pointer-events-auto">
+                  <input
+                    type="text"
+                    value={manualIdea}
+                    onChange={e => setManualIdea(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && manualIdea.trim()) {
+                        socket?.emit('add_idea', { text: manualIdea, cluster: 'General', authorName: userNameRef.current });
+                        setManualIdea('');
+                      }
+                    }}
+                    placeholder="Type an idea..."
+                    className={`flex-1 rounded-lg border border-white/10 bg-black/60 px-3 py-2 text-sm text-white font-mono placeholder:text-white/30 backdrop-blur-xl ${focusRingClass}`}
+                  />
+                  <button
+                    onClick={() => {
+                      if (manualIdea.trim()) {
+                        socket?.emit('add_idea', { text: manualIdea, cluster: 'General', authorName: userNameRef.current });
+                        setManualIdea('');
+                      }
+                    }}
+                    className={`rounded-lg bg-[#A78BFA]/15 border border-[#A78BFA]/30 px-3 py-2 text-[#A78BFA] transition-colors hover:bg-[#A78BFA]/25 ${focusRingClass}`}
+                  >
+                    <Send className="h-4 w-4" />
+                  </button>
+                </div>
+
                 {directionSuggestion && (
                   <div className="flex max-w-2xl items-start gap-3 rounded-xl border border-[#34D399]/30 bg-[#0F0F11]/90 px-4 py-3 shadow-lg backdrop-blur-xl">
                     <BrainCircuit className="w-4 h-4 text-[#34D399] flex-shrink-0 mt-0.5" />
@@ -1466,6 +1499,18 @@ export default function App() {
                             className="w-full h-32 text-sm text-white bg-white/5 px-3 py-2 rounded-lg border border-white/10 focus:border-[#A78BFA]/50 focus:outline-none transition-colors resize-none"
                           />
                         </div>
+                        {role === 'admin' && (
+                          <button
+                            onClick={() => {
+                              socket?.emit('delete_idea', { id: idea.id });
+                              setSelectedIdeaId(null);
+                            }}
+                            className={`mt-2 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-mono text-red-400 transition-colors hover:bg-red-500/20 ${focusRingClass}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete Node
+                          </button>
+                        )}
                       </div>
                     );
                   })()}
@@ -1473,7 +1518,7 @@ export default function App() {
               )}
             </div>
           )}
-          
+
           {phase === 'convergent' && (
             <div className="absolute inset-0 overflow-y-auto p-6 sm:p-8">
               <IdeaVoting
@@ -1588,7 +1633,11 @@ export default function App() {
               <div className="h-px flex-1 mx-2" style={{ background: 'linear-gradient(90deg, #34D399, #22D3EE, transparent)' }} />
             </div>
             <div className="flex-1 overflow-hidden relative">
-              <ArtifactCanvas artifact={artifact} />
+              <ArtifactCanvas
+                artifact={artifact}
+                expanded={artifactExpanded}
+                onToggleExpand={() => setArtifactExpanded(prev => !prev)}
+              />
             </div>
           </div>
           
@@ -1645,6 +1694,16 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {artifactExpanded && (
+        <div className="fixed inset-0 z-[100] flex flex-col bg-[#050505]">
+          <ArtifactCanvas
+            artifact={artifact}
+            expanded={artifactExpanded}
+            onToggleExpand={() => setArtifactExpanded(false)}
+          />
+        </div>
+      )}
     </div>
   );
 }
