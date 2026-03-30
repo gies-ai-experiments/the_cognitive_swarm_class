@@ -1072,12 +1072,16 @@ export default function App() {
               {entryMode === 'admin' ? (
                 <div>
                   <label className="mb-2 block text-xs font-mono uppercase tracking-[0.22em] text-white/45">Brainstorming Topic</label>
-                  <input
-                    type="text"
+                  <textarea
                     value={topic}
-                    onChange={(e) => setTopic(e.target.value)}
-                    placeholder="What is the room solving?"
-                    className={`w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white transition-colors placeholder:text-white/25 ${focusRingClass} focus:border-[#34D399]/50`}
+                    onChange={(e) => {
+                      setTopic(e.target.value);
+                      e.target.style.height = 'auto';
+                      e.target.style.height = e.target.scrollHeight + 'px';
+                    }}
+                    placeholder="What is the room solving? Paste long context here..."
+                    rows={2}
+                    className={`w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white transition-colors placeholder:text-white/25 resize-none overflow-hidden ${focusRingClass} focus:border-[#34D399]/50`}
                   />
                 </div>
               ) : (
@@ -1179,10 +1183,13 @@ export default function App() {
           <div className="flex-1 min-w-0 text-center px-4">
             {role === 'admin' ? (
               isEditingTopic ? (
-                <input
-                  type="text"
+                <textarea
                   value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
+                  onChange={(e) => {
+                    setTopic(e.target.value);
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+                  }}
                   onBlur={() => {
                     if (topic.trim()) {
                       setIsEditingTopic(false);
@@ -1190,18 +1197,25 @@ export default function App() {
                     }
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && topic.trim()) {
+                    if (e.key === 'Enter' && !e.shiftKey && topic.trim()) {
                       setIsEditingTopic(false);
                       socket?.emit('set_topic', topic);
                     }
                   }}
                   autoFocus
-                  className={`w-full max-w-xl rounded-lg border border-[#34D399]/40 bg-white/5 px-3 py-1.5 text-center text-sm text-white ${focusRingClass}`}
+                  rows={1}
+                  ref={(el) => {
+                    if (el) {
+                      el.style.height = 'auto';
+                      el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+                    }
+                  }}
+                  className={`w-full max-w-xl rounded-lg border border-[#34D399]/40 bg-white/5 px-3 py-1.5 text-center text-sm text-white resize-none overflow-hidden ${focusRingClass}`}
                 />
               ) : (
                 <button
                   onClick={() => setIsEditingTopic(true)}
-                  className={`max-w-xl truncate text-sm font-medium text-white/90 transition-colors hover:text-white ${focusRingClass}`}
+                  className={`max-w-xl text-sm font-medium text-white/90 transition-colors hover:text-white line-clamp-2 ${focusRingClass}`}
                   title="Click to edit topic"
                   style={{
                     background: 'linear-gradient(135deg, #34D399 0%, #22D3EE 100%)',
@@ -1209,7 +1223,7 @@ export default function App() {
                     WebkitTextFillColor: 'transparent',
                   }}
                 >
-                  {topic}
+                  {topic.length > 150 ? topic.slice(0, 150) + '…' : topic}
                 </button>
               )
             ) : (
